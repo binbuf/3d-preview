@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="ThumbnailProvider3D.vcxproj" Id="0b5aa70c-f16a-42a1-95d1-73ad75d2fcbf" />
+</Solution>

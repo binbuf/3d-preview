@@ -1,0 +1,139 @@
+# Explorer thumbnail provider
+
+## Scope
+
+thumbnail-provider builds an in-process x64 COM DLL used by Windows Explorer to render model thumbnails. It shares validation, normalized math, material fallbacks, and bounded parsers with model-core, but it does not share the interactive renderer, open a D3D12 device, launch the viewer, start worker processes, or make network requests.
+
+The provider implements:
+
+- IInitializeWithStream to receive the Shell-managed content stream;
+- IThumbnailProvider to produce a requested-size HBITMAP;
+- IClassFactory plus DllGetClassObject and DllCanUnloadNow;
+- explicit module/object/lock reference counts.
+
+The DLL has no registration side effects in DllMain. DllMain only records the module handle and disables unnecessary thread notifications.
+
+## COM classes and extension assignment
+
+Distinct CLSIDs let the factory select an adapter without sniffing every grammar. The values below are product identities and must not be regenerated.
+
+| Family | Extensions | CLSID |
+| --- | --- | --- |
+| glTF | .glb, .gltf | {A592F425-EA68-4C88-BB96-020805D4BE56} |
+| STL | .stl | {BFC86E1A-55C1-4C2D-AA36-3C25DECF30C9} |
+| PLY | .ply | {F4DC6119-E235-4BAC-8089-54EDD84F8492} |
+| OBJ | .obj | {D4722752-C480-4D9C-BEBE-1A9B514A8846} |
+| FBX | .fbx | {FBC218D4-FD2C-41DF-B168-7F3B9E53C84E} |
+| 3MF | .3mf | {D8389A63-8526-454A-9892-72F3149484B9} |
+| USD | .usd, .usda, .usdc, .usdz | {E938BC70-4C08-4446-A15D-EE31576BFB48} |
+
+Each class is registered as an InprocServer32 with ThreadingModel=Apartment and attached to the extension's ShellEx thumbnail-handler GUID. The MSI writes these machine-level registrations; users remain in control of default open applications.
+
+## Call contract
+
+Initialize:
+
+- accepts exactly one non-null IStream;
+- takes an independent stream reference and rejects a second initialization;
+- queries STATSTG when supported, but does not trust its size without checked reads;
+- seeks only if the stream advertises it; adapters that need random access copy into the bounded backing store;
+- never assumes a filesystem path or attempts to recover one.
+
+GetThumbnail:
+
+1. Validates cx in the supported range 16–1024 physical pixels.
+2. Establishes a monotonic deadline: 750 ms target and 2 seconds hard internal cutoff.
+3. Parses metadata and samples geometry within the thumbnail budgets in [03-file-formats-and-ingestion.md](./03-file-formats-and-ingestion.md).
+4. Frames finite bounds, renders a deterministic CPU image, and returns a top-down 32-bit premultiplied BGRA DIB section.
+5. Sets WTS_ALPHATYPE to WTSAT_ARGB.
+
+Explorer owns the returned HBITMAP. The provider releases every other GDI object before returning. A failed call sets the output bitmap to null and returns a precise HRESULT.
+
+## Stream ingestion
+
+The provider accepts a maximum 256 MiB stream and does not write a temporary or persistent file. Seek-capable streams are accessed through serialized, bounded range reads and a small block cache. If an adapter requires one contiguous buffer, the provider may create a checked in-process backing buffer up to 128 MiB; a larger input on that path returns the safe generic-icon fallback. Non-seekable inputs may use that same bounded backing buffer. Reads abort on deadline, limit, or short-read inconsistency.
+
+There is no MapViewOfFile zero-copy guarantee for Shell IStream inputs. This is intentional: Shell isolation, bounded memory, and deterministic latency matter more than sharing the interactive viewer's source mapping implementation.
+
+External dependencies are unavailable in the provider:
+
+- .obj renders geometry without its MTL or texture sidecars;
+- .gltf renders only when required geometry buffers are embedded as data URIs within limits; bounded Draco geometry and KTX2/WebP textures are allowed when their stricter provider decode budgets and deadline hold. A missing optional image uses the default material, while unavailable required geometry safely falls back to the generic icon;
+- .ply and .stl are fully stream-contained and may use their bounded mesh/point sampling paths;
+- .fbx may use bounded embedded geometry/textures;
+- .3mf and .usdz may use contained package entries;
+- .usd/.usda/.usdc do not resolve external references.
+
+The full viewer retains the broader local-sidecar support defined in the format document.
+
+## Geometry sampling
+
+The provider must not normalize a multi-million-triangle model in full merely to draw a 256-pixel image. Each adapter enumerates triangles into a deterministic spatial/reservoir sampler:
+
+- bounds are accumulated from finite vertices;
+- at most 2 million input triangles or 6 million input points are inspected and at most 250,000 representative triangles/points enter rasterization;
+- material boundaries and disconnected large components receive minimum representation;
+- degenerate/non-finite triangles are discarded;
+- a stable source-derived seed ensures Explorer cache consistency.
+
+If trustworthy format metadata supplies bounds, it can guide sampling but is verified against sampled positions. For formats that cannot stream geometry safely under the limits, the provider stops and lets Explorer show its generic icon.
+
+## CPU renderer
+
+The thumbnail DLL uses a product-owned tile rasterizer; no GPU device or graphics queue is created inside Explorer.
+
+- Render at min(max(cx, 64), 512), with 2x supersampling only when the deadline budget permits.
+- Use a transparent canvas, soft neutral floor/contact shadow, and the same neutral material palette as the viewer.
+- Frame a fixed isometric view from verified bounds with 7% margin.
+- Apply model transforms in double precision, clip against the near plane, depth-test tiles, and shade with ambient plus two fixed lights.
+- Render opaque/masked triangles. Approximate transparent materials as weighted opaque color; exact order-independent transparency is unnecessary at thumbnail size.
+- Render point-cloud samples as depth-tested round splats with deterministic size and source/neutral color.
+- Downsample in linear space and convert to premultiplied BGRA.
+
+No text, file path, watermark, network content, or nondeterministic animation appears in the bitmap.
+
+## Threading and unload
+
+An object is apartment-affine. GetThumbnail performs work on the calling thread because the Shell owns call scheduling; it does not create a lasting pool. Parsing libraries are invoked with per-call arenas and no process-global mutable caches. A deadline check is included at bounded parser/sampler/raster tiles.
+
+DllCanUnloadNow returns S_OK only when live objects, class-factory locks, and active calls are all zero. Destructors are noexcept and release stream/backing resources. Thread-local parser scratch cannot keep the module artificially alive.
+
+## Security and robustness
+
+The DLL is treated as hostile-input code executing in a sensitive host:
+
+- compile with /guard:cf, /CETCOMPAT, /DYNAMICBASE, /NXCOMPAT, /sdl, and high warning level;
+- use checked integer/range helpers at every file-derived allocation or offset;
+- disable parser callbacks that open paths, URLs, plug-ins, scripts, codecs, or environment-selected resources;
+- never start or communicate with the OpenUSD compatibility host and never read the viewer's persistent derived cache;
+- place third-party parser calls behind exception and structured-exception containment at the COM boundary where legally safe, while fixing ordinary memory faults rather than masking them;
+- write no model-derived persistent cache;
+- keep diagnostic events path-redacted and disabled unless troubleshooting is enabled.
+
+An importer crash must be addressed by fuzzing/fixing; SEH containment is a last-resort HRESULT boundary, not a correctness mechanism.
+
+## HRESULT mapping
+
+| Condition | HRESULT |
+| --- | --- |
+| Bad pointer/invalid call order | E_POINTER / E_UNEXPECTED |
+| Unsupported stream behavior or format feature | HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) |
+| Malformed or empty geometry | HRESULT_FROM_WIN32(ERROR_BAD_FORMAT) |
+| Limit or deadline exceeded | HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE) / ERROR_TIMEOUT |
+| Allocation failure | E_OUTOFMEMORY |
+| Decoder/importer failure | E_FAIL, with diagnostic event |
+
+Explorer is allowed to fall back to the generic icon. Returning a fabricated “success” bitmap for a failed parse would poison the Shell thumbnail cache and is prohibited.
+
+## Tests
+
+- COM identity, QueryInterface, aggregation rejection, refcount, lock server, and unload tests.
+- One extension-routing test per registry entry and CLSID.
+- PLY mesh/point-cloud golden and hostile-list tests; glTF Draco/KTX2 provider-limit tests.
+- Golden images at 32, 64, 256, and 512 pixels with tolerant perceptual comparison.
+- STA parallel-host stress using multiple COM objects.
+- Truncation, archive bomb, adversarial count, non-seekable stream, timeout, OOM injection, and fuzz corpora.
+- Repeated Explorer surrogate load/unload with GDI/User handle and private-byte leak checks.
+- Verification in the actual Windows thumbnail surrogate at 100%, 150%, and 200% DPI.
+
+Primary references: [Thumbnail provider guidance](https://learn.microsoft.com/windows/win32/shell/thumbnail-providers), [IInitializeWithStream](https://learn.microsoft.com/windows/win32/api/propsys/nn-propsys-iinitializewithstream), and [IThumbnailProvider::GetThumbnail](https://learn.microsoft.com/windows/win32/api/thumbcache/nf-thumbcache-ithumbnailprovider-getthumbnail).

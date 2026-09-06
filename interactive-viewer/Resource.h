@@ -1,0 +1,41 @@
+//{{NO_DEPENDENCIES}}
+// Microsoft Visual C++ generated include file.
+// Used by Preview3D.rc
+
+#define IDS_APP_TITLE			103
+
+#define IDR_MAINFRAME			128
+#define IDD_PREVIEW3D_DIALOG	102
+#define IDD_ABOUTBOX			103
+#define IDM_ABOUT				104
+#define IDM_EXIT				105
+#define IDI_PREVIEW3D			107
+#define IDI_SMALL				108
+#define IDC_PREVIEW3D			109
+#define IDC_MYICON				2
+#define ID_VIEW_OPEN            32771
+#define ID_VIEW_FIT             32772
+#define ID_VIEW_RESET           32773
+#define ID_VIEW_MENU            32774
+#define ID_VIEW_RETRY           32775
+#define ID_VIEW_OPEN_ANOTHER    32776
+#define ID_VIEW_COPY_DETAILS    32777
+#define ID_VIEW_CANCEL          32778
+#define ID_VIEW_CONTROLS        32779
+#define ID_VIEW_OPEN_INITIAL    32780
+#define ID_VIEW_DIAGNOSTICS     32781
+#ifndef IDC_STATIC
+#define IDC_STATIC				-1
+#endif
+// Next default values for new objects
+//
+#ifdef APSTUDIO_INVOKED
+#ifndef APSTUDIO_READONLY_SYMBOLS
+
+#define _APS_NO_MFC					130
+#define _APS_NEXT_RESOURCE_VALUE	129
+#define _APS_NEXT_COMMAND_VALUE		32782
+#define _APS_NEXT_CONTROL_VALUE		1000
+#define _APS_NEXT_SYMED_VALUE		110
+#endif
+#endif

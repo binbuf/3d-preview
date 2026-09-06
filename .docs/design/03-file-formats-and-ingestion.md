@@ -1,0 +1,196 @@
+# File formats and ingestion
+
+## Purpose
+
+This document defines what “supports a format” means, how untrusted files enter the process, and the normalized scene contract consumed by the renderer. It deliberately separates the large-file fast path from compatibility importers.
+
+## Support matrix
+
+| Input | Parser | MVP content | Deliberate limits | Performance tier |
+| --- | --- | --- | --- | --- |
+| .glb, .gltf | fastgltf + Draco + KTX/Basis | glTF 2.0 scenes, nodes, triangle meshes, PBR metallic/roughness and unlit materials, vertex colors, PNG/JPEG/WebP/KTX2 textures, `KHR_texture_transform`, `KHR_draco_mesh_compression`, `EXT_meshopt_compression` | No animation playback, skins, morph targets, lights, cameras, or advanced material lobes. External URIs must resolve to approved local sibling files. A single oversized Draco primitive may fail its decode-working-set limit. | A for ordinary/meshopt data; compressed primitives are bounded decode units |
+| .stl | Product code | Binary and ASCII triangles; supplied normals or generated flat normals | No color/material dialect guarantee | A for binary; B for ASCII |
+| .ply | Product code | ASCII and binary little/big-endian PLY mesh or point cloud; positions, normals, common UV/color properties, polygon faces triangulated on import | Unknown elements/properties are skipped within bounds; no volumetric, range-grid, material, or arbitrary custom-property visualization | A for supported binary layouts; B for ASCII |
+| .obj with optional .mtl | ufbx OBJ loader | Faces, smoothing, normals, UVs, vertex colors where available, MTL colors and approved local texture maps | Triangulated on import; .mtl is never opened as a primary document | B |
+| .fbx | ufbx | Binary/ASCII FBX, static hierarchy, instancing, polygon geometry, unified PBR materials, and a deterministic evaluated start pose including supported skin and blend deformers | No animation playback, geometry caches, dynamic constraints, NURBS/subdivision tessellation, cameras, or lights | B |
+| .3mf | lib3mf | Core, Materials, Production, and bounded Beam Lattice preview subsets; components, build items, transforms, colors/materials, textures | Slice, Secure Content, Volumetric, and Implicit extensions are not supported; any unsupported required extension fails | B |
+| .usd, .usda, .usdc, .usdz | TinyUSDZ fast path; OpenUSD compatibility host | Static meshes, transforms, instances/point instances, display color, bounded Preview Surface materials, packaged textures, and bounded local composition including sublayers, references, inherits/specializes, authored variant selections, and payloads | No animation playback, skeletal data, variants UI, MaterialX, remote assets, procedural schemas, or arbitrary renderer plug-ins | B |
+
+Tier A is the release-gated out-of-core path for the multi-gigabyte workload in [01-product-scope.md](./01-product-scope.md). Tier B formats are still MVP features, but their parser libraries may materialize more intermediate state and therefore have lower enforced limits. Draco primitives are independently bounded because their decoded topology cannot be demand-paged from the compressed bitstream. A format badge is shown when a file uses an ignored or approximated optional feature; unsupported required geometry/composition fails instead of silently presenting an apparently faithful model.
+
+## Input boundary
+
+All primary inputs are local, regular, non-empty files. The loader rejects:
+
+- UNC paths, device paths, alternate data streams, URLs, and URI schemes other than local relative file references;
+- reparse points that resolve outside the primary model's directory when following a sidecar reference;
+- absolute sidecar paths and any normalized relative path that escapes the primary directory;
+- files that change identity or size after opening;
+- integer overflow, overlapping ranges where prohibited by the format, invalid UTF encoding, non-finite geometry, and counts that exceed the applicable budget.
+
+The app canonicalizes a path with GetFinalPathNameByHandleW after opening it. It holds the primary handle for the generation's lifetime with FILE_SHARE_READ only, which prevents ordinary replacement, deletion, or writing while pointers are live. Each sidecar is opened and checked independently. Security checks are performed on the final handle path, not only on user-provided text.
+
+No importer performs network access. In-process third-party parsers allocate and resolve resources only through product callbacks that enforce the generation's cancellation token, byte budget, item-count limits, and path policy. OpenUSD internal allocation is additionally contained by the compatibility-host Job Object/commit budget. The host receives no path authority: its custom resolver requests read-only dependencies from the viewer broker, which applies the same handle-based canonicalization before duplicating a handle or serving bytes.
+
+## Mapped-file abstraction
+
+Model Core exposes a read-only MappedFile and MappingLease abstraction:
+
+1. Open with CreateFileW using GENERIC_READ, FILE_SHARE_READ, and OPEN_EXISTING. Use a sequential access hint for STL, PLY, and packaged sequential scans, a random-access hint for glTF/USD offset graphs, and no hint when the access pattern is not yet known; the extension is only a cache hint, never a trust decision.
+2. Query file size and identity with GetFileInformationByHandleEx and reject zero-length or non-regular inputs.
+3. Create a PAGE_READONLY file mapping.
+4. For a compact source, map the complete file. For very large sources and sidecars, map aligned windows on demand using the system allocation granularity.
+5. Return a span of const bytes whose lifetime cannot exceed its MappingLease. No parser-owned raw pointer may survive a lease.
+6. Unmap windows only after every task using the lease has released it.
+
+Mapping a file removes an eager full-file userspace copy; it does not make parsing allocation-free and does not make file bytes directly usable as GPU vertex data. The OS commits physical pages as they are touched. Normalized geometry, decompressed archives, decoded textures, acceleration data, upload staging, and GPU resources remain explicitly budgeted.
+
+Validated upcoming sequential ranges may be submitted to `PrefetchVirtualMemory` when profiling shows a benefit; correctness and responsiveness cannot depend on prefetch completion. For glTF BIN data, binary STL, and supported binary PLY layouts, adapters retain validated source offsets and decode bounded ranges into reusable scratch blocks. A parser that requires contiguous ownership receives a budgeted arena, never an unbounded vector sized from a file field.
+
+## Import generations
+
+Opening a file creates a monotonically increasing LoadGeneration with:
+
+- a stop_source;
+- source identity and mapping leases;
+- byte, object-count, scratch-memory, archive-expansion, and elapsed-work budgets;
+- a bounded event sink;
+- provisional and verified bounds;
+- a normalized chunk catalog;
+- upload and residency state.
+
+Opening another file requests stop on the prior generation and immediately makes its events stale. Consumers compare generation IDs before applying any event. Destruction occurs only after CPU tasks release leases and the direct/copy fence retirement points make associated GPU objects safe to release. Cancellation is cooperative at parser callbacks, scan blocks, triangulation batches, texture rows, simplification clusters, and upload chunks.
+
+## Format pipelines
+
+### glTF and GLB
+
+fastgltf validates glTF 2.0 structure while the adapter owns URI resolution and data access. GLB headers, JSON/BIN ranges, buffer views, accessors, strides, sparse accessors, and component conversions are checked before use. `KHR_mesh_quantization`, `EXT_meshopt_compression`, `KHR_draco_mesh_compression`, `KHR_texture_basisu`, `EXT_texture_webp`, `KHR_texture_transform`, and `KHR_materials_unlit` are accepted when their required data passes validation. meshoptimizer, the pinned Draco decoder, KTX/Basis transcoder, and libwebp handle their corresponding payloads behind the same budgets. Unknown required extensions fail clearly. Unknown optional extensions are ignored only when core geometry remains valid and are reported in diagnostics.
+
+Draco decode is scheduled per primitive on the loader pool and publishes nothing until the decoded attributes and indices pass count/range/finite validation. A primitive whose decoded working set would exceed 512 MiB or 10 million triangles fails with `ResourceLimit`; the design does not claim out-of-core decoding within one Draco bitstream. Meshopt-compressed buffer views remain suitable for bounded range decode.
+
+Accessor min/max values may produce provisional scene bounds quickly, but they are not trusted as verified bounds. A bounded position scan verifies them while geometry is normalized. If verified bounds materially differ and the user has not moved the camera, the app eases to the corrected frame. If the user has interacted, camera target and scale are corrected without overriding their orientation.
+
+A .gltf may reference approved local `.bin`, `.png`, `.jpg/.jpeg`, `.webp`, and `.ktx2` siblings. Data URIs have encoded- and decoded-byte caps. Unsupported image MIME types use the material fallback only when the image is not required to recover valid geometry.
+
+### STL
+
+The binary adapter validates the 84-byte prefix and checked multiplication of the 50-byte facet count. Trailing bytes are tolerated and diagnosed. Facets are scanned in bounded ranges directly from the mapping. Degenerate/non-finite facets are dropped, normals are normalized when credible, and otherwise flat normals are generated.
+
+The ASCII adapter uses a streaming tokenizer with fixed-size blocks, a token length cap, locale-independent number parsing, and no recursive grammar. It is Tier B because text parsing touches and converts the complete source.
+
+### PLY
+
+The product parser accepts PLY 1.0 ASCII, binary little-endian, and binary big-endian streams. The header has line, token, property, element, and byte limits. It must declare finite scalar `x`, `y`, and `z` vertex properties. Recognized optional properties include normals, common `u/v` or `s/t` texture-coordinate aliases, and RGB/RGBA colors in bounded integer or floating representations.
+
+Face index lists are range-checked and triangulated with a bounded scratch polygon. Point-only input is valid and emits point clusters; mesh input emits triangles and may also retain unreferenced points only when the point budget permits. Unknown elements and properties are skipped using their declared checked scalar/list types. Unsupported scalar encodings, malformed lists, or an element whose byte extent cannot be proven fail before allocation.
+
+Binary PLY uses format-aware sequential mapped windows. Before the complete scan, the adapter reads stratified validated record windows across the vertex/face ranges to build a source-order-independent representative proxy; every sampled record is fully bounds-checked, and verified bounds still require the complete scan. ASCII PLY is Tier B because tokenization converts the complete source.
+
+### OBJ and MTL
+
+ufbx imports OBJ geometry and, when present, the named MTL sidecar. The adapter supplies a constrained open callback so mtllib and texture references cannot escape the source directory. Polygons are triangulated; invalid faces are reported and skipped only when the remaining model is coherent. Relative indices and smoothing groups are supported.
+
+Missing MTL files or textures do not fail valid geometry. They produce a warning and a neutral material. The Explorer thumbnail path does not resolve OBJ sidecars because IInitializeWithStream provides neither a trustworthy filesystem location nor an arbitrary-file capability.
+
+### FBX
+
+ufbx is configured for explicit allocation and temporary-memory caps, progress callbacks, cancellation, triangulation, and static scene evaluation. The normalized scene uses evaluated local/global transforms and preserves instances where deformation permits. If an animation stack exists, the preview pose is deterministically evaluated at the start time of the first authored stack; otherwise the file's default/rest evaluation is used. Supported skin clusters and blend-channel weights are baked into that static normalized pose. Animation curves are not retained and no playback is implied. Geometry caches, dynamic constraints, NURBS, and subdivision surfaces produce a warning or `UnsupportedRequiredFeature` when omitting them would remove required visible geometry.
+
+ufbx's unified PBR material mapping feeds the normalized base-color/metallic/roughness/emissive/normal subset. Embedded and approved local texture blobs are subject to the same decoded-byte and MIME allowlist as external textures.
+
+### 3MF
+
+Before lib3mf reads the bounded OPC stream, product code preflights the ZIP central directory and enforces archive entry paths, per-entry sizes, aggregate expansion, compression ratio, and required-extension allowlist. The adapter then validates object/component recursion and build-item counts before allocating normalized resources. Components become instances where possible. The allowlist covers Core, Materials and Properties, Production, and a bounded Beam Lattice preview subset. Beam cylinders/frusta and balls are tessellated against a screen-error and triangle budget so a lattice remains recognizable without unbounded expansion. Unsupported optional property resources fall back to a deterministic neutral material; an unsupported required extension fails.
+
+### USD and USDZ
+
+TinyUSDZ first handles USDA, USDC, and USDZ files in the common static subset. It returns a distinct `UnsupportedComposition` result when otherwise valid input requires composition outside that subset. Only that result triggers the compatibility path; malformed data, unsafe references, archive violations, and resource-limit failures do not receive a more permissive retry.
+
+The AppContainer compatibility host opens the stage through pinned OpenUSD with initial payload loading disabled. Its composition policy permits sublayers, references, inherits/specializes, and authored default variant selections; its brokered resolver admits only approved local asset dependencies. Discovery and payload loading proceed breadth-first under dependency-count, byte, depth, time, and memory limits. Payloads needed for the build/default stage are loaded incrementally. The host emits only the normalized static subset: meshes, transforms, instances/point instances, display color, and supported Preview Surface bindings. Animation, skeletal schemas, MaterialX, procedural schemas, renderer plug-ins, remote assets, and interactive variant selection remain outside MVP. USDZ archive entries use the same archive/path limits regardless of adapter.
+
+## Normalized scene
+
+Importer-specific objects never cross into Streaming or Graphics. Model Core produces immutable metadata plus chunk descriptors:
+
+| Object | Required fields |
+| --- | --- |
+| SceneMetadata | generation, source format, source units/up axis, node/material/triangle counts, warnings, provisional/verified bounds |
+| Node | parent, double-precision local transform, optional mesh reference, visibility |
+| Material | base color factor/texture, metallic, roughness, emissive, normal texture, UV transform, unlit, alpha mode/cutoff, double-sided flag |
+| TextureSource | bounded encoded bytes or validated mapping range, MIME/container, mip metadata, color space, sampler |
+| MeshCluster | mesh/node IDs, triangle-or-point topology, double-precision origin, local AABB/sphere, material, LOD descriptors |
+| ChunkDescriptor | source/normalized range, topology, index/vertex counts, vertex layout, LOD, byte size, dependencies |
+
+Vertices use cluster-local float positions relative to a double-precision cluster origin so large coordinates retain usable precision. Node transforms and bounds remain double precision on the CPU; the renderer produces camera-relative float transforms each frame. Normals and tangents use a tested packed signed format, UVs use half2 when representable and float2 otherwise, colors use normalized RGBA8 when lossless enough, and indices use 16 or 32 bits per chunk. Point clusters carry a bounded screen-space size policy rather than synthetic triangle expansion in CPU memory.
+
+The normalizer deduplicates only within bounded clusters. It never builds a whole-scene hash table. Target detail chunks are 4–16 MiB of GPU payload and at most 262,144 triangles or 1,048,576 points. Logical primitives are split when needed while preserving material and instance identity.
+
+## Bounds, proxy, and LOD
+
+Verified bounds are reduced incrementally from finite normalized positions. A scene sphere is derived from the verified AABB and refined when economical. Empty or entirely invalid geometry fails with EmptyGeometry.
+
+Each Tier A import creates:
+
+- a coarse, always-resident proxy capped at the lesser of 2 million triangles/points, 5% of valid source primitives, and its reserved GPU budget;
+- an intermediate target near 50% detail where meshoptimizer can simplify without unacceptable error;
+- full-detail chunks.
+
+The first proxy is produced from validated, stratified source ranges and early spatial clusters, then replaced by the complete coarse proxy. Sampling must not depend only on file order. It may appear before the entire source scan completes, but the UI labels it as loading until verified bounds and the full proxy catalog are ready. Sharp boundaries and material seams are protected; point clouds use deterministic spatial/reservoir sampling. If simplification fails a quality threshold, the cluster keeps its next coarser valid representation.
+
+Tier B adapters feed the same normalized chunk contract and LOD builder when their intermediate representation fits the Tier B budget.
+
+## Hard limits
+
+Limits are checked before multiplication/allocation and are configurable only in developer builds.
+
+| Budget | Tier A viewer | Tier B viewer | Thumbnail host |
+| --- | ---: | ---: | ---: |
+| Primary source | 8 GiB | 2 GiB | 256 MiB stream |
+| All local source/sidecar bytes | 12 GiB | 4 GiB | Stream only |
+| Valid source triangles | 100 million | 20 million | 2 million inspected/sampled |
+| Valid source points | 100 million | 20 million | 6 million inspected; 250,000 rasterized |
+| Source vertices/accessor elements | 300 million | 60 million | 6 million sampled |
+| Nodes/objects | 100,000 | 50,000 | 10,000 |
+| Materials | 65,536 | 32,768 | 4,096 |
+| Decoded texture pixels, aggregate | 1 gigapixel | 512 megapixels | 32 megapixels |
+| Archive expansion (.3mf/.usdz) | N/A | 4 GiB and 200:1 ratio | 128 MiB and 100:1 ratio |
+| Parser/normalizer live scratch | 1 GiB or 25% of physical RAM, whichever is lower | 1.5 GiB or 35%, whichever is lower | 192 MiB |
+| OpenUSD compatibility-host private commit | N/A | 4 GiB or 35% of physical RAM, whichever is lower | N/A |
+| One Draco primitive decoded working set | 512 MiB and 10 million triangles | 512 MiB and 10 million triangles | 96 MiB and 1 million triangles |
+| Total provider private commit above host baseline | N/A | N/A | 384 MiB |
+
+These are acceptance ceilings, not promises that all limit-sized scenes fit simultaneously. GPU detail is separately constrained by the live DXGI budget. Above-limit files receive ResourceLimit with the first exceeded named limit; the process remains usable.
+
+## Texture policy
+
+The texture layer accepts format/container combinations explicitly enabled by the source adapter:
+
+- inbox WIC paths for PNG, JPEG, BMP, and TIFF;
+- DirectXTex paths for validated TGA, HDR, and DDS;
+- pinned libwebp for WebP;
+- KTX-Software/Basis transcoding for KTX2 and `KHR_texture_basisu`.
+
+It does not enumerate or invoke arbitrary installed WIC codecs. Encoded type is verified from bytes and declared MIME/container metadata rather than extension alone. Color textures are sRGB; data/normal textures remain linear. Dimensions, row pitch, mip/array/depth counts, multiplication, total pixels, and compressed input size are checked before decode or direct upload.
+
+Validated DDS/KTX2 mip chains may upload directly when their DXGI formats are supported. Basis payloads transcode to a supported BC7/BC5/BC3/BC1 target selected by semantic and adapter capabilities, with RGBA8 fallback. Existing small mip levels are uploaded first. For ordinary raster images, decoder-native downscaling is requested when trustworthy and CPU mip generation otherwise happens in cancellable tiles. Tangents are generated only for visible geometry whose material actually requires tangent-space normal mapping. A missing, corrupt, or unsupported optional texture uses a deterministic checker/neutral fallback without hiding the mesh.
+
+## Error taxonomy
+
+Adapters return typed errors, not localized strings:
+
+- FileUnavailable, FileChanged, UnsafeReference;
+- UnsupportedVersion, UnsupportedRequiredFeature, UnsupportedEncoding;
+- MalformedData, IntegerOverflow, ArchiveLimit;
+- ResourceLimit, OutOfMemory, Cancelled;
+- NoSupportedGeometry, TextureDecodeFailed;
+- UnsupportedComposition, CompatibilityHostFailure, CompatibilityHostLimit;
+- InternalImporterFailure.
+
+The application maps these to user text and preserves format, byte offset/object path where safe, and a correlation ID in diagnostic logs. Third-party exceptions never cross a module boundary.
+
+## Verification
+
+Every adapter requires valid, malformed, truncated, adversarial-count, cancellation, and limit fixtures. Tier A tests additionally assert bounded resident CPU memory, source-order-independent proxy representation, and that no source-sized heap allocation occurs. PLY fixtures cover ASCII and both binary endiannesses, meshes, point clouds, unknown properties, and hostile lists. glTF fixtures cover Draco/KTX2/WebP success and decoded-expansion limits. FBX fixtures verify deterministic static skin/blend evaluation. USD fixtures run both fast and compatibility paths and assert equivalent normalized output where their supported subsets overlap. The same normalized-scene invariant suite runs across all formats.
+
+Primary references: [Windows file mapping](https://learn.microsoft.com/windows/win32/memory/file-mapping), [fastgltf](https://github.com/spnda/fastgltf), [Google Draco](https://github.com/google/draco), [KTX-Software](https://github.com/KhronosGroup/KTX-Software), [ufbx](https://github.com/ufbx/ufbx), [lib3mf](https://github.com/3MFConsortium/lib3mf), [TinyUSDZ](https://github.com/lighttransport/tinyusdz), [OpenUSD](https://openusd.org/release/), [DirectXTex](https://github.com/microsoft/DirectXTex), and [meshoptimizer](https://github.com/zeux/meshoptimizer).

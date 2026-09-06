@@ -1,0 +1,51 @@
+# Visual Studio user state and caches
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build output
+[Dd]ebug/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+[Bb]in/
+[Oo]bj/
+
+# C/C++ intermediate and diagnostic files
+*.obj
+*.iobj
+*.ipdb
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.lastbuildstate
+*.recipe
+*.obj.dt.*
+ipch/
+*.ipch
+
+# Visual Studio database files
+*.VC.db
+*.VC.db-shm
+*.VC.db-wal
+*.VC.opendb
+*.opendb
+*.vsidx
+
+# Test and coverage output
+TestResults/
+*.coverage
+*.coveragexml
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+~$*
