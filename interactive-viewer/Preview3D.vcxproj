@@ -72,10 +72,10 @@
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalOptions>/permissive- %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/permissive- /utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;d2d1.lib;dwrite.lib;dwmapi.lib;comctl32.lib;shell32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;d2d1.lib;dwrite.lib;dwmapi.lib;comctl32.lib;shell32.lib;ole32.lib;runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -148,18 +148,24 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="framework.h" />
+    <ClInclude Include="Chrome.h" />
+    <ClInclude Include="InfoPanel.h" />
     <ClInclude Include="Model.h" />
     <ClInclude Include="NavGizmo.h" />
     <ClInclude Include="Preview3D.h" />
     <ClInclude Include="Renderer.h" />
     <ClInclude Include="Resource.h" />
+    <ClInclude Include="ShellIntegration.h" />
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Chrome.cpp" />
+    <ClCompile Include="InfoPanel.cpp" />
     <ClCompile Include="Model.cpp" />
     <ClCompile Include="NavGizmo.cpp" />
     <ClCompile Include="Preview3D.cpp" />
     <ClCompile Include="Renderer.cpp" />
+    <ClCompile Include="ShellIntegration.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Preview3D.rc" />

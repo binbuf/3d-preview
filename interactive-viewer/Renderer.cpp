@@ -936,7 +936,204 @@ struct Renderer::Impl
         }
     }
 
-    void DrawOverlay(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo)
+    // Photos-style bottom bar: a bar strip matching the title bar's fill,
+    // with a zoom-percent readout on the right of the (separately
+    // HWND-hosted) zoom slider. Only drawn while a model is loaded — see
+    // OverlayInfo::bottomBarHeight, which the app zeroes out otherwise.
+    void DrawBottomBar(const OverlayInfo& overlay, float clientWidth, float clientHeight, float scale)
+    {
+        if (overlay.bottomBarHeight <= 0) return;
+        const float barTop = clientHeight - static_cast<float>(overlay.bottomBarHeight);
+        const float contentRight = clientWidth - static_cast<float>(overlay.infoPanelWidth);
+        SetBrush(D2D1::ColorF(0x2C2C2E));
+        overlayTarget->FillRectangle(D2D1::RectF(0, barTop, clientWidth, clientHeight), brush.Get());
+        SetBrush(D2D1::ColorF(0x3A3A3C));
+        overlayTarget->FillRectangle(D2D1::RectF(0, barTop, clientWidth, barTop + 1.0f), brush.Get());
+
+        const std::wstring percentText = std::to_wstring(static_cast<int>(std::lround(overlay.zoomPercent))) + L"%";
+        const float labelWidth = Scale(56, scale);
+        const float margin = Scale(14, scale);
+        DrawText(percentText, smallFormat.Get(),
+            D2D1::RectF(contentRight - margin - labelWidth, barTop, contentRight - margin, clientHeight),
+            D2D1::ColorF(0xA1A1A6), DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
+
+    // Right-docked, read-only "Stats & Shading" panel — see InfoPanel.h for
+    // the section/row content, built by the app from the loaded model's
+    // scanned ModelStats.
+    void DrawInfoPanel(const OverlayInfo& overlay, float clientWidth, float clientHeight, float scale)
+    {
+        if (overlay.infoPanelWidth <= 0) return;
+        const float panelWidth = static_cast<float>(overlay.infoPanelWidth);
+        const float left = clientWidth - panelWidth;
+        const float top = static_cast<float>(overlay.toolbarHeight);
+        const float bottom = clientHeight - static_cast<float>(overlay.bottomBarHeight);
+
+        SetBrush(D2D1::ColorF(0x242426));
+        overlayTarget->FillRectangle(D2D1::RectF(left, top, clientWidth, bottom), brush.Get());
+        SetBrush(D2D1::ColorF(0x3A3A3C));
+        overlayTarget->FillRectangle(D2D1::RectF(left, top, left + 1.0f, bottom), brush.Get());
+
+        const float margin = Scale(16, scale);
+        const float rowHeight = Scale(24, scale);
+        const float sectionGap = Scale(18, scale);
+        const float textLeft = left + margin;
+        const float textRight = clientWidth - margin;
+        float y = top + Scale(18, scale);
+
+        DrawText(L"Stats & Shading", filenameFormat.Get(),
+            D2D1::RectF(textLeft, y, textRight, y + Scale(22, scale)), D2D1::ColorF(0xF5F5F7));
+        y += Scale(34, scale);
+
+        for (const InfoPanelSection& section : overlay.infoPanelSections)
+        {
+            if (y > bottom) break;
+            DrawText(section.title, smallFormat.Get(), D2D1::RectF(textLeft, y, textRight, y + rowHeight),
+                D2D1::ColorF(0x0A84FF));
+            y += rowHeight;
+            for (const InfoPanelRow& row : section.rows)
+            {
+                if (y > bottom) break;
+                const D2D1_RECT_F rowRect = D2D1::RectF(textLeft, y, textRight, y + rowHeight);
+                DrawText(row.label, smallFormat.Get(), rowRect, D2D1::ColorF(0xA1A1A6));
+                DrawText(row.value, smallFormat.Get(), rowRect, D2D1::ColorF(0xF5F5F7), DWRITE_TEXT_ALIGNMENT_TRAILING);
+                y += rowHeight;
+            }
+            y += sectionGap - rowHeight;
+        }
+    }
+
+    static D2D1_RECT_F ToRectF(RECT rect)
+    {
+        return D2D1::RectF(static_cast<float>(rect.left), static_cast<float>(rect.top),
+            static_cast<float>(rect.right), static_cast<float>(rect.bottom));
+    }
+
+    // Windows-11-Photos-style unified title bar: system icon, centered
+    // filename, action buttons, Open With, and the (D2D-drawn, NC-hit-tested)
+    // system min/max/close — all laid out by Chrome::UpdateLayout.
+    void DrawTitleBar(const OverlayInfo& overlay, const Chrome& chrome, float clientWidth, float scale)
+    {
+        const RECT barRectI = chrome.TitleBarRect();
+        const float barHeight = static_cast<float>(barRectI.bottom);
+        SetBrush(D2D1::ColorF(0x2C2C2E));
+        overlayTarget->FillRectangle(D2D1::RectF(0, 0, clientWidth, barHeight), brush.Get());
+        SetBrush(D2D1::ColorF(0x3A3A3C));
+        overlayTarget->FillRectangle(D2D1::RectF(0, barHeight - 1, clientWidth, barHeight), brush.Get());
+
+        const D2D1_RECT_F iconRect = ToRectF(chrome.Button(Chrome::Part::SystemIcon).rect);
+        SetBrush(D2D1::ColorF(0x3A3A3C));
+        overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(iconRect, Scale(6, scale), Scale(6, scale)), brush.Get());
+        DrawText(L"3D", smallFormat.Get(), iconRect, D2D1::ColorF(0xFFFFFF), DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        const std::wstring filename = overlay.filename.empty() ? L"3D Preview" : overlay.filename;
+        DrawText(filename, filenameFormat.Get(), ToRectF(chrome.FilenameRect()), D2D1::ColorF(0xF5F5F7),
+            DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        // Text-labeled action buttons, matching the old owner-drawn toolbar
+        // button palette (primary/secondary/active/hover/pressed).
+        auto drawActionButton = [&](Chrome::Part part, const wchar_t* label, bool active)
+        {
+            const Chrome::ButtonState& state = chrome.Button(part);
+            if (!state.visible) return;
+            const D2D1_RECT_F rect = ToRectF(state.rect);
+            const bool hovered = chrome.hover == part;
+            const bool pressedNow = chrome.pressed == part;
+            D2D1_COLOR_F fill = D2D1::ColorF(0x3A3A3C);
+            D2D1_COLOR_F text = D2D1::ColorF(0xF5F5F7);
+            if (active) fill = D2D1::ColorF(0x0A84FF, 0.28f);
+            if (hovered) fill = active ? D2D1::ColorF(0x0A84FF, 0.40f) : D2D1::ColorF(0x46464A);
+            if (pressedNow) fill = active ? D2D1::ColorF(0x0A84FF, 0.55f) : D2D1::ColorF(0x2C2C2E);
+            if (!state.enabled) { fill = D2D1::ColorF(0x2C2C2E); text = D2D1::ColorF(0x707075); }
+            SetBrush(fill);
+            overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(6, scale), Scale(6, scale)), brush.Get());
+            DrawText(label, smallFormat.Get(), rect, text, DWRITE_TEXT_ALIGNMENT_CENTER);
+        };
+        drawActionButton(Chrome::Part::Grid, L"Grid", overlay.gridVisible);
+        drawActionButton(Chrome::Part::AxisSnap, L"Snap", overlay.axisSnapEnabled);
+        drawActionButton(Chrome::Part::Speed, L"Speed", false);
+        drawActionButton(Chrome::Part::Fit, L"Fit", false);
+        drawActionButton(Chrome::Part::Reset, L"Reset", false);
+        drawActionButton(Chrome::Part::Info, L"Info", overlay.infoPanelVisible);
+        drawActionButton(Chrome::Part::Share, L"Share", false);
+        drawActionButton(Chrome::Part::Overflow, L"•••", false);
+        drawActionButton(Chrome::Part::OpenWith, L"Open With ▾", false);
+
+        // System caption buttons: simple vector glyphs, matching Windows 11's
+        // minimize/maximize-or-restore/close. DWM (via DwmDefWindowProc,
+        // Preview3D.cpp) draws the hover/press background for these — the
+        // hover/press tint here is a same-frame fallback for any gap before
+        // that first paints.
+        auto drawSystemButton = [&](Chrome::Part part, auto drawGlyph, bool closeButton)
+        {
+            const Chrome::ButtonState& state = chrome.Button(part);
+            const D2D1_RECT_F rect = ToRectF(state.rect);
+            const bool hovered = chrome.hover == part;
+            const bool pressedNow = chrome.pressed == part;
+            if (pressedNow) { SetBrush(closeButton ? D2D1::ColorF(0xC42B1C) : D2D1::ColorF(0x3F3F42)); overlayTarget->FillRectangle(rect, brush.Get()); }
+            else if (hovered) { SetBrush(closeButton ? D2D1::ColorF(0xE81123) : D2D1::ColorF(0x35353A)); overlayTarget->FillRectangle(rect, brush.Get()); }
+            SetBrush(D2D1::ColorF(0xF5F5F7));
+            const float cx = (rect.left + rect.right) * 0.5f;
+            const float cy = (rect.top + rect.bottom) * 0.5f;
+            drawGlyph(cx, cy);
+        };
+        const float glyphHalf = Scale(5, scale);
+        drawSystemButton(Chrome::Part::Minimize, [&](float cx, float cy)
+        {
+            overlayTarget->DrawLine(D2D1::Point2F(cx - glyphHalf, cy), D2D1::Point2F(cx + glyphHalf, cy), brush.Get(), 1.0f);
+        }, false);
+        drawSystemButton(Chrome::Part::Maximize, [&](float cx, float cy)
+        {
+            if (chrome.Maximized())
+            {
+                const float inset = Scale(2, scale);
+                overlayTarget->DrawRectangle(D2D1::RectF(cx - glyphHalf + inset, cy - glyphHalf, cx + glyphHalf, cy + glyphHalf - inset), brush.Get(), 1.0f);
+                overlayTarget->DrawRectangle(D2D1::RectF(cx - glyphHalf, cy - glyphHalf + inset, cx + glyphHalf - inset, cy + glyphHalf), brush.Get(), 1.0f);
+            }
+            else
+            {
+                overlayTarget->DrawRectangle(D2D1::RectF(cx - glyphHalf, cy - glyphHalf, cx + glyphHalf, cy + glyphHalf), brush.Get(), 1.0f);
+            }
+        }, false);
+        drawSystemButton(Chrome::Part::Close, [&](float cx, float cy)
+        {
+            overlayTarget->DrawLine(D2D1::Point2F(cx - glyphHalf, cy - glyphHalf), D2D1::Point2F(cx + glyphHalf, cy + glyphHalf), brush.Get(), 1.0f);
+            overlayTarget->DrawLine(D2D1::Point2F(cx - glyphHalf, cy + glyphHalf), D2D1::Point2F(cx + glyphHalf, cy - glyphHalf), brush.Get(), 1.0f);
+        }, true);
+    }
+
+    // Photos-style "drop-down under the button with a slider and a number
+    // value" for travel speed — a small floating panel below the Speed
+    // button, drawn on top of the viewport. The app owns the panel/track
+    // rects and drag math (Preview3D.cpp); this only draws them.
+    void DrawSpeedFlyout(const OverlayInfo& overlay, float scale)
+    {
+        if (!overlay.speedFlyoutOpen) return;
+        const D2D1_RECT_F panel = ToRectF(overlay.speedFlyoutRect);
+        SetBrush(D2D1::ColorF(0x242426, 0.98f));
+        overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(panel, Scale(10, scale), Scale(10, scale)), brush.Get());
+        SetBrush(D2D1::ColorF(0x3A3A3C));
+        overlayTarget->DrawRoundedRectangle(D2D1::RoundedRect(panel, Scale(10, scale), Scale(10, scale)), brush.Get(), 1.0f);
+
+        DrawText(L"Travel speed", smallFormat.Get(),
+            D2D1::RectF(panel.left + Scale(16, scale), panel.top + Scale(8, scale), panel.right - Scale(16, scale), panel.top + Scale(26, scale)),
+            D2D1::ColorF(0xA1A1A6));
+        DrawText(overlay.speedValueText, smallFormat.Get(),
+            D2D1::RectF(panel.left + Scale(16, scale), panel.top + Scale(8, scale), panel.right - Scale(16, scale), panel.top + Scale(26, scale)),
+            D2D1::ColorF(0xF5F5F7), DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+        const D2D1_RECT_F track = ToRectF(overlay.speedFlyoutTrackRect);
+        const float trackY = (track.top + track.bottom) * 0.5f;
+        SetBrush(D2D1::ColorF(0x48484C));
+        overlayTarget->DrawLine(D2D1::Point2F(track.left, trackY), D2D1::Point2F(track.right, trackY), brush.Get(), Scale(3, scale));
+        const float thumbX = track.left + (track.right - track.left) * std::clamp(overlay.speedSliderT, 0.0f, 1.0f);
+        SetBrush(D2D1::ColorF(0x0A84FF));
+        overlayTarget->DrawLine(D2D1::Point2F(track.left, trackY), D2D1::Point2F(thumbX, trackY), brush.Get(), Scale(3, scale));
+        SetBrush(D2D1::ColorF(0xF5F5F7));
+        overlayTarget->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumbX, trackY), Scale(7, scale), Scale(7, scale)), brush.Get());
+    }
+
+    void DrawOverlay(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo, const Chrome& chrome)
     {
         if (!overlayTarget || !brush) return;
         if (overlay.state != ViewerState::Loading && !CreateTextFormats(overlay.dpiScale)) return;
@@ -944,6 +1141,12 @@ struct Renderer::Impl
         const float toolbar = static_cast<float>(overlay.toolbarHeight);
         const float clientWidth = static_cast<float>(width);
         const float clientHeight = static_cast<float>(height);
+        // Bottom-anchored chrome (status pill, warning badge, HUD pills) sits
+        // above the bottom bar and left of the Information panel, both of
+        // which are only reserved while a model is loaded (see
+        // OverlayInfo::bottomBarHeight/infoPanelWidth).
+        const float contentBottom = clientHeight - static_cast<float>(overlay.bottomBarHeight);
+        const float contentRight = clientWidth - static_cast<float>(overlay.infoPanelWidth);
 
         overlayTarget->BeginDraw();
         if (overlay.state == ViewerState::Loading)
@@ -973,24 +1176,7 @@ struct Renderer::Impl
             return;
         }
 
-        SetBrush(D2D1::ColorF(0x2C2C2E));
-        overlayTarget->FillRectangle(D2D1::RectF(0, 0, clientWidth, toolbar), brush.Get());
-        SetBrush(D2D1::ColorF(0x3A3A3C));
-        overlayTarget->FillRectangle(D2D1::RectF(0, toolbar - 1, clientWidth, toolbar), brush.Get());
-
-        const float badgeLeft = Scale(12, scale);
-        const float badgeTop = Scale(12, scale);
-        const float badgeSize = Scale(28, scale);
-        SetBrush(D2D1::ColorF(0x3A3A3C));
-        overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(
-            D2D1::RectF(badgeLeft, badgeTop, badgeLeft + badgeSize, badgeTop + badgeSize), Scale(7, scale), Scale(7, scale)), brush.Get());
-        DrawText(L"3D", smallFormat.Get(), D2D1::RectF(badgeLeft, badgeTop + Scale(4, scale), badgeLeft + badgeSize,
-            badgeTop + badgeSize), D2D1::ColorF(0xFFFFFF), DWRITE_TEXT_ALIGNMENT_CENTER);
-
-        const std::wstring filename = overlay.filename.empty() ? L"3D Preview" : overlay.filename;
-        const float titleWidth = std::min(Scale(360, scale), std::max(120.0f, clientWidth - Scale(620, scale)));
-        DrawText(filename, filenameFormat.Get(), D2D1::RectF((clientWidth - titleWidth) * 0.5f, 0,
-            (clientWidth + titleWidth) * 0.5f, toolbar), D2D1::ColorF(0xF5F5F7), DWRITE_TEXT_ALIGNMENT_CENTER);
+        DrawTitleBar(overlay, chrome, clientWidth, scale);
 
         const D2D1_COLOR_F primaryText = D2D1::ColorF(0xF5F5F7);
         const D2D1_COLOR_F secondaryText = D2D1::ColorF(0xA1A1A6);
@@ -1063,20 +1249,20 @@ struct Renderer::Impl
         {
             const float margin = Scale(14, scale);
             const float pillHeight = Scale(30, scale);
-            const float pillWidth = std::min(clientWidth - margin * 2, Scale(350, scale));
-            const D2D1_ROUNDED_RECT pill = D2D1::RoundedRect(D2D1::RectF(margin, clientHeight - margin - pillHeight,
-                margin + pillWidth, clientHeight - margin), pillHeight * 0.5f, pillHeight * 0.5f);
+            const float pillWidth = std::min(contentRight - margin * 2, Scale(350, scale));
+            const D2D1_ROUNDED_RECT pill = D2D1::RoundedRect(D2D1::RectF(margin, contentBottom - margin - pillHeight,
+                margin + pillWidth, contentBottom - margin), pillHeight * 0.5f, pillHeight * 0.5f);
             SetBrush(D2D1::ColorF(0x111318, 0.82f));
             overlayTarget->FillRoundedRectangle(pill, brush.Get());
-            DrawText(overlay.status, smallFormat.Get(), D2D1::RectF(margin + Scale(12, scale), clientHeight - margin - pillHeight,
-                margin + pillWidth - Scale(10, scale), clientHeight - margin - Scale(1, scale)), secondaryText);
+            DrawText(overlay.status, smallFormat.Get(), D2D1::RectF(margin + Scale(12, scale), contentBottom - margin - pillHeight,
+                margin + pillWidth - Scale(10, scale), contentBottom - margin - Scale(1, scale)), secondaryText);
         }
 
         if (!overlay.warning.empty() && overlay.state == ViewerState::Ready)
         {
             const float size = Scale(30, scale);
-            const float right = clientWidth - Scale(14, scale);
-            const float bottom = clientHeight - Scale(14, scale);
+            const float right = contentRight - Scale(14, scale);
+            const float bottom = contentBottom - Scale(14, scale);
             SetBrush(D2D1::ColorF(0xFF9F0A, 0.92f));
             overlayTarget->FillEllipse(D2D1::Ellipse(D2D1::Point2F(right - size * 0.5f, bottom - size * 0.5f),
                 size * 0.5f, size * 0.5f), brush.Get());
@@ -1089,10 +1275,10 @@ struct Renderer::Impl
         {
             if (alpha <= 0.01f || text.empty() || overlay.state != ViewerState::Ready) return;
             const float pillHeight = Scale(26, scale);
-            const float pillWidth = std::min(clientWidth - Scale(28, scale),
+            const float pillWidth = std::min(contentRight - Scale(28, scale),
                 std::max(Scale(96, scale), Scale(14, scale) + static_cast<float>(text.size()) * Scale(7.6f, scale)));
-            const float left = (clientWidth - pillWidth) * 0.5f;
-            const float top = clientHeight - bottomOffset - pillHeight;
+            const float left = (contentRight - pillWidth) * 0.5f;
+            const float top = contentBottom - bottomOffset - pillHeight;
             const D2D1_ROUNDED_RECT pill = D2D1::RoundedRect(D2D1::RectF(left, top, left + pillWidth, top + pillHeight),
                 pillHeight * 0.5f, pillHeight * 0.5f);
             SetBrush(D2D1::ColorF(0x111318, 0.84f * alpha));
@@ -1103,11 +1289,16 @@ struct Renderer::Impl
         drawHud(overlay.speedHud, overlay.speedHudAlpha, Scale(84, scale));
         drawHud(overlay.modeHud, overlay.modeHudAlpha, Scale(50, scale));
 
-        // Navigation gizmo on top of everything else.
+        DrawBottomBar(overlay, clientWidth, clientHeight, scale);
+        DrawInfoPanel(overlay, clientWidth, clientHeight, scale);
+
+        // Navigation gizmo on top of everything else, except a floating
+        // flyout (Speed), which floats above even that.
         if (overlay.state == ViewerState::Ready && overlay.hasModel)
         {
             DrawGizmo(camera, gizmo, scale);
         }
+        DrawSpeedFlyout(overlay, scale);
 
         if (overlayTarget->EndDraw() == D2DERR_RECREATE_TARGET)
         {
@@ -1356,7 +1547,7 @@ bool Renderer::HasModel() const
     return impl_->vertexBuffer && impl_->indexBuffer && impl_->indexCount > 0;
 }
 
-void Renderer::Render(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo)
+void Renderer::Render(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo, const Chrome& chrome)
 {
     if (!impl_->context || !impl_->renderTarget || impl_->width <= 0 || impl_->height <= 0) return;
     ID3D11RenderTargetView* renderTarget = impl_->renderTarget.Get();
@@ -1367,8 +1558,11 @@ void Renderer::Render(const Camera& camera, const OverlayInfo& overlay, const Na
 
     const bool loading = overlay.state == ViewerState::Loading;
     const float viewportTop = loading ? 0.0f : static_cast<float>(overlay.toolbarHeight);
-    const float viewportHeight = std::max(1.0f, static_cast<float>(impl_->height) - viewportTop);
-    D3D11_VIEWPORT viewport{ 0.0f, viewportTop, static_cast<float>(impl_->width), viewportHeight, 0.0f, 1.0f };
+    const float bottomInset = loading ? 0.0f : static_cast<float>(overlay.bottomBarHeight);
+    const float panelInset = loading ? 0.0f : static_cast<float>(overlay.infoPanelWidth);
+    const float viewportWidth = std::max(1.0f, static_cast<float>(impl_->width) - panelInset);
+    const float viewportHeight = std::max(1.0f, static_cast<float>(impl_->height) - viewportTop - bottomInset);
+    D3D11_VIEWPORT viewport{ 0.0f, viewportTop, viewportWidth, viewportHeight, 0.0f, 1.0f };
     impl_->context->RSSetViewports(1, &viewport);
     impl_->context->RSSetState(impl_->rasterizerState.Get());
     impl_->context->OMSetDepthStencilState(impl_->depthState.Get(), 0);
@@ -1380,7 +1574,7 @@ void Renderer::Render(const Camera& camera, const OverlayInfo& overlay, const Na
 
     const XMVECTOR eye = camera.EyePosition();
     const XMMATRIX view = camera.ViewMatrix();
-    const float aspect = static_cast<float>(impl_->width) / viewportHeight;
+    const float aspect = viewportWidth / viewportHeight;
     const XMMATRIX projection = camera.ProjectionMatrix(aspect);
     FrameConstants constants;
     XMStoreFloat4x4(&constants.viewProjection, view * projection);
@@ -1409,6 +1603,6 @@ void Renderer::Render(const Camera& camera, const OverlayInfo& overlay, const Na
         impl_->context->DrawIndexed(impl_->indexCount, 0, 0);
     }
 
-    impl_->DrawOverlay(camera, overlay, gizmo);
+    impl_->DrawOverlay(camera, overlay, gizmo, chrome);
     impl_->swapChain->Present(1, 0);
 }

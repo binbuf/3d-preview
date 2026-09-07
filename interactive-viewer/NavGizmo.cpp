@@ -72,7 +72,7 @@ XMVECTOR CanonicalViewOrientation(ViewDir view)
     return XMQuaternionIdentity();
 }
 
-void NavGizmo::UpdateLayout(int viewportWidth, int viewportHeight, int toolbarHeight, float dpiScale)
+void NavGizmo::UpdateLayout(int viewportWidth, int viewportHeight, int topInset, int bottomInset, float dpiScale)
 {
     const float scale = std::max(0.75f, dpiScale);
     outer_ = kOuterLogical * scale;
@@ -83,13 +83,14 @@ void NavGizmo::UpdateLayout(int viewportWidth, int viewportHeight, int toolbarHe
     hitSlop_ = kHitSlopLogical * scale;
     const float margin = kCornerMarginLogical * scale;
     const float width = std::max(1.0f, static_cast<float>(viewportWidth));
-    const float height = std::max(1.0f, static_cast<float>(viewportHeight));
-    const float top = static_cast<float>(toolbarHeight);
+    const float top = static_cast<float>(topInset);
+    const float bottom = std::max(top + 1.0f, static_cast<float>(viewportHeight) - static_cast<float>(bottomInset));
     centerX_ = std::max(outer_ + margin, width - margin - outer_);
     // Keep the gizmo inside short viewports rather than overlapping the
-    // status area, falling back to the toolbar edge if space runs out.
+    // status area, falling back to the top-bar/bottom-bar edges if space
+    // runs out.
     const float highest = top + margin + outer_;
-    const float lowest = std::max(top + outer_, height - margin - outer_);
+    const float lowest = std::max(top + outer_, bottom - margin - outer_);
     centerY_ = std::min(highest, lowest);
     hover = Part::None;
 }
@@ -136,18 +137,25 @@ NavGizmo::Part NavGizmo::HitTest(XMVECTOR cameraOrientation, float pointerX, flo
         }
     }
 
-    // The ball: drag anywhere on the disc to orbit. It sits behind the nodes,
-    // so it only wins when no node sphere is closer to the viewer.
+    // A node/dot hit always wins over the ball: the renderer (DrawGizmo)
+    // always paints every node on top of the ball's flat disc regardless of
+    // depth, so the ball must never out-rank a node here either. Arbitrating
+    // ball-vs-node by the same painter's-algorithm depth as the node-vs-node
+    // comparison above (as this used to do) is wrong: the ball is a full
+    // sphere of radius `outer_`, which bulges toward the viewer enough at a
+    // node's screen offset to beat any node whose axis is closer to
+    // edge-on (small view-space depth) — even though that node is clearly
+    // visible and unoccluded on screen. That mismatch made clicks on
+    // legitimately-visible nodes (e.g. an axis near-perpendicular to the
+    // current view) silently grab the ball instead of snapping the view.
+    if (best != Part::None) return best;
+
+    // The ball: drag anywhere else on the disc to orbit.
     {
         const float radius = outer_ - 2.0f * hitSlop_;
         const float squared = radius * radius - gx * gx - gy * gy;
-        if (squared >= 0.0f)
-        {
-            const float t = eyeZ - std::sqrt(squared);
-            if (t < bestT) best = Part::Ball;
-        }
+        if (squared >= 0.0f) return Part::Ball;
     }
-    if (best != Part::None) return best;
 
     // Axis stems as 2D segments from the center to each positive tip.
     float bestDistance = std::numeric_limits<float>::infinity();

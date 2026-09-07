@@ -64,8 +64,11 @@ public:
     };
 
     // Repositions and resizes the gizmo for the current viewport. Coordinates
-    // are client pixels; the top-right placement sits below the toolbar.
-    void UpdateLayout(int viewportWidth, int viewportHeight, int toolbarHeight, float dpiScale);
+    // are client pixels; the top-right placement sits below the title bar and
+    // clear of the bottom bar. `viewportWidth` is already narrowed by the
+    // caller to exclude the Information panel when it's open, so the gizmo
+    // never sits underneath it.
+    void UpdateLayout(int viewportWidth, int viewportHeight, int topInset, int bottomInset, float dpiScale);
 
     // 2.5D raycast hit-test. The pointer spawns a view-space ray against the
     // six axis-node spheres and the center ball; the intersection nearest to

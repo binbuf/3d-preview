@@ -489,6 +489,22 @@ public:
         {
             return false;
         }
+        if (const JsonValue* animations = root_.Find("animations");
+            animations && animations->type == JsonValue::Type::Array)
+        {
+            model_->stats.animationCount = static_cast<int>(animations->array.size());
+        }
+        if (const JsonValue* skins = root_.Find("skins"); skins && skins->type == JsonValue::Type::Array)
+        {
+            model_->stats.skinCount = static_cast<int>(skins->array.size());
+            for (const JsonValue& skin : skins->array)
+            {
+                if (const JsonValue* joints = skin.Find("joints"); joints && joints->type == JsonValue::Type::Array)
+                {
+                    model_->stats.boneCount += static_cast<int>(joints->array.size());
+                }
+            }
+        }
         const JsonValue* meshes = root_.Find("meshes");
         if (!meshes || meshes->type != JsonValue::Type::Array || meshes->array.empty())
         {
@@ -506,6 +522,7 @@ public:
                 return false;
             }
             nodes_ = nodes;
+            model.stats.nodeCount = static_cast<int>(nodes->array.size());
             visitState_.resize(nodes->array.size());
 
             std::vector<int> roots;
@@ -692,12 +709,26 @@ private:
         return true;
     }
 
+    // True if any component of a factor array (RGB or RGBA) is non-zero, so the
+    // Information panel can say "constant" only where a factor actually
+    // contributes something, rather than for an unset (all-zero) default.
+    static bool FactorIsNonZero(const JsonValue* factor)
+    {
+        if (!factor || factor->type != JsonValue::Type::Array) return false;
+        for (const JsonValue& component : factor->array)
+        {
+            if (component.type == JsonValue::Type::Number && component.number != 0.0) return true;
+        }
+        return false;
+    }
+
     bool ParseMaterials(std::wstring& error)
     {
         UNREFERENCED_PARAMETER(error);
         colors_.push_back(XMFLOAT4(0.72f, 0.76f, 0.82f, 1.0f));
         const JsonValue* materials = root_.Find("materials");
         if (!materials || materials->type != JsonValue::Type::Array) return true;
+        model_->stats.materialCount = static_cast<int>(materials->array.size());
         for (const JsonValue& material : materials->array)
         {
             XMFLOAT4 color(0.72f, 0.76f, 0.82f, 1.0f);
@@ -711,7 +742,62 @@ private:
                         static_cast<float>(factor->array[0].number), static_cast<float>(factor->array[1].number),
                         static_cast<float>(factor->array[2].number), static_cast<float>(factor->array[3].number));
                 }
-                if (pbr->Find("baseColorTexture")) ignoredTextures_ = true;
+                if (pbr->Find("baseColorTexture"))
+                {
+                    ignoredTextures_ = true;
+                    ++model_->stats.albedoTextureCount;
+                }
+                else
+                {
+                    model_->stats.hasConstantBaseColor = true;
+                }
+                if (pbr->Find("metallicRoughnessTexture"))
+                {
+                    ignoredTextures_ = true;
+                    ++model_->stats.specularMetallicTextureCount;
+                }
+                if (factor && factor->type == JsonValue::Type::Array && factor->array.size() >= 4 &&
+                    factor->array[3].number < 1.0)
+                {
+                    model_->stats.hasTransparency = true;
+                }
+            }
+            else
+            {
+                model_->stats.hasConstantBaseColor = true;
+            }
+            if (const JsonValue* alphaMode = material.Find("alphaMode");
+                alphaMode && alphaMode->type == JsonValue::Type::String && alphaMode->string != "OPAQUE")
+            {
+                model_->stats.hasTransparency = true;
+            }
+            if (material.Find("normalTexture"))
+            {
+                ignoredTextures_ = true;
+                ++model_->stats.normalTextureCount;
+            }
+            if (material.Find("occlusionTexture"))
+            {
+                ignoredTextures_ = true;
+                ++model_->stats.occlusionTextureCount;
+            }
+            if (material.Find("emissiveTexture"))
+            {
+                ignoredTextures_ = true;
+                ++model_->stats.emissiveTextureCount;
+            }
+            else if (FactorIsNonZero(material.Find("emissiveFactor")))
+            {
+                model_->stats.hasConstantEmissiveColor = true;
+            }
+            if (const JsonValue* extensions = material.Find("extensions"))
+            {
+                if (const JsonValue* specular = extensions->Find("KHR_materials_specular"))
+                {
+                    if (specular->Find("specularColorTexture")) ignoredTextures_ = true;
+                    else if (FactorIsNonZero(specular->Find("specularColorFactor")))
+                        model_->stats.hasConstantSpecularColor = true;
+                }
             }
             colors_.push_back(color);
         }
@@ -1044,7 +1130,10 @@ private:
             if (const JsonValue* color = attributes->Find("COLOR_0"))
             {
                 if (!ReadColors(color->Integer(), positions.size(), vertexColors, error)) return false;
+                model_->stats.hasVertexColors = true;
             }
+            if (attributes->Find("TEXCOORD_0")) model_->stats.hasUv0 = true;
+            if (attributes->Find("TEXCOORD_1")) model_->stats.hasUv1 = true;
             const JsonValue* indexValue = primitive.Find("indices");
             if (!ReadIndices(indexValue ? indexValue->Integer() : -1, positions.size(), indices, error)) return false;
 
@@ -1088,6 +1177,7 @@ private:
             }
             if (normals.empty()) GenerateNormals(base, indices);
             for (std::uint32_t value : indices) model_->indices.push_back(base + value);
+            ++model_->stats.drawCallCount;
         }
         return true;
     }

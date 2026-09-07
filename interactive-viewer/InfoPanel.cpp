@@ -1,0 +1,97 @@
+#include "framework.h"
+#include "InfoPanel.h"
+
+#include <algorithm>
+
+namespace
+{
+constexpr float kPanelWidthLogical = 300.0f;
+
+std::wstring FormatCount(std::uint64_t value)
+{
+    std::wstring text = std::to_wstring(value);
+    for (std::ptrdiff_t index = static_cast<std::ptrdiff_t>(text.size()) - 3; index > 0; index -= 3)
+    {
+        text.insert(static_cast<std::size_t>(index), 1, L',');
+    }
+    return text;
+}
+
+std::wstring YesNo(bool value)
+{
+    return value ? L"Yes" : L"No";
+}
+
+// A texture-slot row reads as a count when any material references it, and
+// falls back to "Constant"/"No" when it's factor-only or entirely unset —
+// matching the (?) fields the user's spec couldn't pin an exact int/bool
+// shape for ahead of time.
+std::wstring TextureSlotValue(int textureCount, bool hasConstantFactor)
+{
+    if (textureCount > 0) return L"Textured (" + std::to_wstring(textureCount) + L")";
+    if (hasConstantFactor) return L"Constant";
+    return L"No";
+}
+}
+
+std::vector<InfoPanelSection> BuildInfoPanelSections(
+    const ModelStats& stats, std::uint64_t triangleCount, std::uint64_t vertexCount)
+{
+    std::vector<InfoPanelSection> sections;
+
+    sections.push_back({ L"Mesh Data",
+        {
+            { L"Triangles", FormatCount(triangleCount) },
+            { L"Vertices", FormatCount(vertexCount) },
+            { L"UV Set 0", YesNo(stats.hasUv0) },
+            { L"UV Set 1", YesNo(stats.hasUv1) },
+            { L"Vertex Colors", YesNo(stats.hasVertexColors) },
+            { L"Material IDs", std::to_wstring(stats.materialCount) },
+        } });
+
+    sections.push_back({ L"Texture Data",
+        {
+            { L"Albedo", TextureSlotValue(stats.albedoTextureCount, stats.hasConstantBaseColor) },
+            { L"Normal", TextureSlotValue(stats.normalTextureCount, false) },
+            { L"Specular / Metallic", TextureSlotValue(stats.specularMetallicTextureCount, false) },
+            { L"Gloss / Roughness", stats.specularMetallicTextureCount > 0 ? L"Packed with Specular/Metallic" : L"No" },
+            { L"Occlusion", TextureSlotValue(stats.occlusionTextureCount, false) },
+            { L"Emissive", TextureSlotValue(stats.emissiveTextureCount, false) },
+            { L"Opacity", YesNo(stats.hasTransparency) },
+            { L"Base Color", stats.hasConstantBaseColor ? L"Constant" : (stats.albedoTextureCount > 0 ? L"Textured" : L"No") },
+            { L"Specular Color", TextureSlotValue(0, stats.hasConstantSpecularColor) },
+            { L"Emissive Color", TextureSlotValue(stats.emissiveTextureCount, stats.hasConstantEmissiveColor) },
+        } });
+
+    sections.push_back({ L"Animation Data",
+        {
+            { L"Bones", std::to_wstring(stats.boneCount) },
+            { L"Skins", std::to_wstring(stats.skinCount) },
+            { L"Animation Takes", std::to_wstring(stats.animationCount) },
+        } });
+
+    sections.push_back({ L"Performance Data",
+        {
+            { L"Draw Calls", std::to_wstring(stats.drawCallCount) },
+        } });
+
+    sections.push_back({ L"Scene Data",
+        {
+            { L"Nodes", std::to_wstring(stats.nodeCount) },
+        } });
+
+    return sections;
+}
+
+InfoPanelLayout ComputeInfoPanelLayout(int viewportWidth, int viewportHeight,
+    int titleBarHeight, int bottomBarHeight, float dpiScale)
+{
+    InfoPanelLayout layout;
+    const float width = std::min(kPanelWidthLogical * std::max(0.75f, dpiScale),
+        std::max(0.0f, static_cast<float>(viewportWidth) * 0.9f));
+    layout.right = static_cast<float>(viewportWidth);
+    layout.left = layout.right - width;
+    layout.top = static_cast<float>(titleBarHeight);
+    layout.bottom = static_cast<float>(viewportHeight - bottomBarHeight);
+    return layout;
+}

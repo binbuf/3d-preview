@@ -1,8 +1,11 @@
 #include "framework.h"
 #include "Preview3D.h"
+#include "Chrome.h"
+#include "InfoPanel.h"
 #include "Model.h"
 #include "Renderer.h"
 #include "NavGizmo.h"
+#include "ShellIntegration.h"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -69,13 +72,7 @@ struct ViewerApp
 {
     HINSTANCE instance = nullptr;
     HWND window = nullptr;
-    HWND openButton = nullptr;
-    HWND fitButton = nullptr;
-    HWND resetButton = nullptr;
-    HWND gridButton = nullptr;
-    HWND axisSnapButton = nullptr;
-    HWND speedSlider = nullptr;
-    HWND menuButton = nullptr;
+    HWND zoomSlider = nullptr;
     HWND retryButton = nullptr;
     HWND openAnotherButton = nullptr;
     HWND copyButton = nullptr;
@@ -84,11 +81,16 @@ struct ViewerApp
     UINT dpi = 96;
     float dpiScale = 1.0f;
     int toolbarHeight = 52;
+    int bottomBarHeight = 44;
+    bool infoPanelVisible = false;
+    bool speedFlyoutOpen = false;
+    bool speedSliderDragging = false;
     bool rendererReady = false;
     bool closing = false;
     Renderer renderer;
     Camera camera;
     NavGizmo gizmo;
+    Chrome chrome;
     ViewerState state = ViewerState::Empty;
     PointerMode pointerMode = PointerMode::None;
     POINT lastPointer{};
@@ -163,21 +165,64 @@ double NowSeconds()
     LARGE_INTEGER counter{};
     QueryPerformanceCounter(&counter);
     return static_cast<double>(counter.QuadPart) / frequency;
-}float ViewportAspect(const ViewerApp& app)
+}
+
+// The bottom bar and Information panel only reserve screen space while a
+// model is actually loaded and navigable (same condition as CanNavigate,
+// inlined here since CanNavigate is defined later in this file).
+bool HasNavigableModel(const ViewerApp& app)
+{
+    return app.state == ViewerState::Ready && app.renderer.HasModel();
+}
+
+// Effective bottom-bar inset for layout purposes: reserved only while a
+// model is loaded, matching HasNavigableModel.
+int EffectiveBottomBarHeight(const ViewerApp& app)
+{
+    return HasNavigableModel(app) ? app.bottomBarHeight : 0;
+}
+
+// Fixed logical width of the Information panel, docked to the right edge
+// while open; 0 when closed or no model is loaded. Mirrors
+// InfoPanel::ComputeInfoPanelLayout's own clamp so callers that only need the
+// width don't have to build a full layout (and don't recurse into an
+// already-narrowed viewport width).
+int InfoPanelWidthPixels(const ViewerApp& app)
+{
+    if (!app.infoPanelVisible || !HasNavigableModel(app)) return 0;
+    RECT client{};
+    GetClientRect(app.window, &client);
+    return static_cast<int>(std::lround(ComputeInfoPanelLayout(
+        client.right, client.bottom, app.toolbarHeight, app.bottomBarHeight, app.dpiScale).Width()));
+}
+
+float ViewportAspect(const ViewerApp& app)
 {
     RECT client{};
     GetClientRect(app.window, &client);
-    return static_cast<float>(std::max(1L, client.right)) /
-        static_cast<float>(std::max(1L, client.bottom - app.toolbarHeight));
+    return static_cast<float>(std::max(1L, client.right - InfoPanelWidthPixels(app))) /
+        static_cast<float>(std::max(1L, client.bottom - app.toolbarHeight - EffectiveBottomBarHeight(app)));
 }
 
-// The 3D viewport is the client area below the toolbar.
+// The 3D viewport is the client area below the title bar, above the bottom
+// bar, and left of the Information panel (when open).
 RECT ViewportRect(const ViewerApp& app)
 {
     RECT viewport{};
     GetClientRect(app.window, &viewport);
     viewport.top = app.toolbarHeight;
+    viewport.bottom -= EffectiveBottomBarHeight(app);
+    viewport.right -= InfoPanelWidthPixels(app);
     return viewport;
+}
+
+// Gate for pointer messages: true only inside the actual 3D viewport, so
+// clicks landing in the bottom bar or the Information panel never reach
+// camera navigation, gizmo hit-testing, or mesh picking.
+bool PointInViewport(const ViewerApp& app, POINT point)
+{
+    const RECT viewport = ViewportRect(app);
+    return PtInRect(&viewport, point) != FALSE;
 }
 
 std::wstring FileNameFromPath(const std::wstring& path)
@@ -328,7 +373,41 @@ void UpdateGizmoLayout(ViewerApp& app)
 {
     RECT client{};
     GetClientRect(app.window, &client);
-    app.gizmo.UpdateLayout(client.right, client.bottom, app.toolbarHeight, app.dpiScale);
+    app.gizmo.UpdateLayout(client.right - InfoPanelWidthPixels(app), client.bottom,
+        app.toolbarHeight, EffectiveBottomBarHeight(app), app.dpiScale);
+}
+
+void UpdateChromeLayout(ViewerApp& app)
+{
+    RECT client{};
+    GetClientRect(app.window, &client);
+    app.chrome.UpdateLayout(client.right, app.toolbarHeight, app.dpiScale,
+        HasNavigableModel(app), IsZoomed(app.window) != FALSE);
+}
+
+// Speed flyout panel/track geometry, shared by drawing (RenderScene) and
+// input handling (WM_LBUTTONDOWN/MOUSEMOVE) so they can never disagree.
+RECT SpeedFlyoutRect(const ViewerApp& app)
+{
+    const RECT speedButton = app.chrome.Button(Chrome::Part::Speed).rect;
+    const int width = Scale(app, 220);
+    const int height = Scale(app, 64);
+    const int gap = Scale(app, 6);
+    RECT client{};
+    GetClientRect(app.window, &client);
+    int left = std::min(speedButton.left, client.right - Scale(app, 8) - width);
+    left = std::max(left, Scale(app, 8));
+    const int top = app.toolbarHeight + gap;
+    return RECT{ left, top, left + width, top + height };
+}
+
+RECT SpeedFlyoutTrackRect(const ViewerApp& app)
+{
+    const RECT panel = SpeedFlyoutRect(app);
+    const int marginX = Scale(app, 16);
+    const int trackCenterY = panel.top + Scale(app, 44);
+    const int halfHeight = Scale(app, 8);
+    return RECT{ panel.left + marginX, trackCenterY - halfHeight, panel.right - marginX, trackCenterY + halfHeight };
 }
 
 void BeginWrappedDrag(ViewerApp& app, const POINT& point)
@@ -493,6 +572,11 @@ void FrameSelectedOrAll(ViewerApp& app)
     InvalidateRect(app.window, nullptr, FALSE);
 }
 
+// Speed flyout slider range (logical 0..kSpeedSliderMax "pixels" along its
+// D2D-drawn track — see the Speed flyout drawing/drag code below). Not a
+// native trackbar: the flyout always reads app.camera.FlySpeedScale() live
+// each frame, so unlike the old always-visible toolbar slider there is no
+// separate position to keep synced.
 constexpr int kSpeedSliderMax = 100;
 constexpr double kSpeedSliderMin = 0.05;   // matches Camera::kFlySpeedMin
 constexpr double kSpeedSliderTop = 40.0;   // matches Camera::kFlySpeedMax
@@ -510,16 +594,57 @@ double SpeedForSliderPosition(int position)
     return kSpeedSliderMin * std::pow(kSpeedSliderTop / kSpeedSliderMin, t);
 }
 
-void SyncSpeedSlider(ViewerApp& app)
-{
-    if (app.speedSlider) SendMessageW(app.speedSlider, TBM_SETPOS, TRUE, SpeedSliderPositionFor(app.camera.FlySpeedScale()));
-}
-
 void AdjustFlySpeed(ViewerApp& app, float wheelSteps)
 {
     app.camera.SetFlySpeedScale(app.camera.FlySpeedScale() * std::pow(1.18, static_cast<double>(wheelSteps)));
-    SyncSpeedSlider(app);
     ShowSpeedHud(app, L"Travel speed ×" + FormatMultiplier(app.camera.FlySpeedScale()));
+}
+
+// Direct manipulation: sets speed immediately from a drag position within
+// the Speed flyout's track (SpeedFlyoutTrackRect), same non-eased feel as
+// the zoom slider's own direct-drag handling.
+void SetFlySpeedFromFlyoutX(ViewerApp& app, int clientX)
+{
+    const RECT track = SpeedFlyoutTrackRect(app);
+    const float t = std::clamp(static_cast<float>(clientX - track.left) / static_cast<float>(std::max(1L, track.right - track.left)), 0.0f, 1.0f);
+    app.camera.SetFlySpeedScale(SpeedForSliderPosition(static_cast<int>(std::lround(t * kSpeedSliderMax))));
+}
+
+constexpr int kZoomSliderMax = 1000;
+
+// Zoom slider position increases as the camera moves closer (more zoomed
+// in). Distance range mirrors Camera::Dolly's own clamp (Renderer.cpp) so
+// the slider can always reach the same extremes wheel-zoom can, and is
+// recomputed from the live scene radius rather than cached, since it
+// changes with every loaded model.
+int ZoomSliderPositionFor(const Camera& camera)
+{
+    const double minDistance = std::max(1e-6, camera.sceneRadius * 0.025);
+    const double maxDistance = std::max(minDistance * 1.0001, camera.sceneRadius * 250.0);
+    const double distance = std::clamp(camera.distance, minDistance, maxDistance);
+    const double t = std::log(maxDistance / distance) / std::log(maxDistance / minDistance);
+    return static_cast<int>(std::lround(std::clamp(t, 0.0, 1.0) * kZoomSliderMax));
+}
+
+double ZoomDistanceForSliderPosition(const Camera& camera, int position)
+{
+    const double minDistance = std::max(1e-6, camera.sceneRadius * 0.025);
+    const double maxDistance = std::max(minDistance * 1.0001, camera.sceneRadius * 250.0);
+    const double t = std::clamp(static_cast<double>(position), 0.0, static_cast<double>(kZoomSliderMax)) / kZoomSliderMax;
+    return maxDistance * std::pow(minDistance / maxDistance, t);
+}
+
+// Only called after an explicit, instantaneous change (model load, Fit,
+// Reset, wheel dolly) — never every frame during an eased glide, so it never
+// fights a live drag on the slider itself.
+void SyncZoomSlider(ViewerApp& app)
+{
+    if (app.zoomSlider) SendMessageW(app.zoomSlider, TBM_SETPOS, TRUE, ZoomSliderPositionFor(app.camera));
+}
+
+float ZoomPercentFor(const Camera& camera)
+{
+    return static_cast<float>(100.0 * camera.homeDistance / std::max(1e-6, camera.distance));
 }
 
 // Guards toggle commands against keyboard auto-repeat: holding a key must not
@@ -538,7 +663,6 @@ void ToggleGrid(ViewerApp& app)
     if (!CanNavigate(app) || !ConsumeToggleCommand(app, ID_VIEW_GRID)) return;
     app.gridVisible = !app.gridVisible;
     ShowModeHud(app, app.gridVisible ? L"Ground grid shown" : L"Ground grid hidden");
-    if (app.gridButton) InvalidateRect(app.gridButton, nullptr, FALSE);
     InvalidateRect(app.window, nullptr, FALSE);
 }
 
@@ -556,7 +680,6 @@ void ToggleAxisSnap(ViewerApp& app)
     if (!CanNavigate(app) || !ConsumeToggleCommand(app, ID_VIEW_AXIS_SNAP)) return;
     app.axisSnapEnabled = !app.axisSnapEnabled;
     ShowModeHud(app, app.axisSnapEnabled ? L"Axis snap on" : L"Axis snap off");
-    if (app.axisSnapButton) InvalidateRect(app.axisSnapButton, nullptr, FALSE);
     InvalidateRect(app.window, nullptr, FALSE);
 }
 
@@ -583,19 +706,8 @@ void SetControlVisible(HWND control, bool visible)
 void UpdateButtonAvailability(ViewerApp& app)
 {
     const BOOL hasModel = app.renderer.HasModel() ? TRUE : FALSE;
-    EnableWindow(app.fitButton, hasModel);
-    EnableWindow(app.resetButton, hasModel);
-    EnableWindow(app.gridButton, hasModel);
-    EnableWindow(app.axisSnapButton, hasModel);
-    EnableWindow(app.speedSlider, hasModel);
-    const bool toolbarVisible = app.state != ViewerState::Loading;
-    SetControlVisible(app.openButton, toolbarVisible);
-    SetControlVisible(app.fitButton, toolbarVisible);
-    SetControlVisible(app.resetButton, toolbarVisible);
-    SetControlVisible(app.gridButton, toolbarVisible);
-    SetControlVisible(app.axisSnapButton, toolbarVisible);
-    SetControlVisible(app.speedSlider, toolbarVisible);
-    SetControlVisible(app.menuButton, toolbarVisible);
+    EnableWindow(app.zoomSlider, hasModel);
+    SetControlVisible(app.zoomSlider, hasModel != FALSE);
     SetControlVisible(app.retryButton, app.state == ViewerState::Failed);
     SetControlVisible(app.openAnotherButton, app.state == ViewerState::Failed);
     SetControlVisible(app.copyButton, app.state == ViewerState::Failed);
@@ -608,24 +720,19 @@ void LayoutControls(ViewerApp& app)
     RECT client{};
     GetClientRect(app.window, &client);
     const int margin = Scale(app, 9);
-    const int gap = Scale(app, 6);
-    const int buttonHeight = Scale(app, 32);
-    const int y = (app.toolbarHeight - buttonHeight) / 2;
-    const int menuWidth = Scale(app, 38);
-    const int resetWidth = Scale(app, 92);
-    const int gridWidth = Scale(app, 56);
-    const int snapWidth = Scale(app, 56);
-    const int sliderWidth = Scale(app, 96);
-    const int fitWidth = Scale(app, 48);
-    const int openWidth = Scale(app, 68);
-    int right = client.right - margin;
-    MoveWindow(app.menuButton, right - menuWidth, y, menuWidth, buttonHeight, TRUE); right -= menuWidth + gap;
-    MoveWindow(app.resetButton, right - resetWidth, y, resetWidth, buttonHeight, TRUE); right -= resetWidth + gap;
-    MoveWindow(app.gridButton, right - gridWidth, y, gridWidth, buttonHeight, TRUE); right -= gridWidth + gap;
-    MoveWindow(app.axisSnapButton, right - snapWidth, y, snapWidth, buttonHeight, TRUE); right -= snapWidth + gap;
-    MoveWindow(app.speedSlider, right - sliderWidth, y, sliderWidth, buttonHeight, TRUE); right -= sliderWidth + gap;
-    MoveWindow(app.fitButton, right - fitWidth, y, fitWidth, buttonHeight, TRUE); right -= fitWidth + gap;
-    MoveWindow(app.openButton, right - openWidth, y, openWidth, buttonHeight, TRUE);
+
+    // Photos-style bottom bar: a zoom slider spanning most of the width,
+    // leaving room on the right for the D2D-drawn zoom-percent readout
+    // (DrawBottomBar, Renderer.cpp) and a matching margin on the left.
+    if (app.zoomSlider)
+    {
+        const int barY = client.bottom - app.bottomBarHeight;
+        const int sliderHeight = Scale(app, 24);
+        const int sliderY = barY + (app.bottomBarHeight - sliderHeight) / 2;
+        const int percentReserve = Scale(app, 84);
+        const int sliderRight = client.right - InfoPanelWidthPixels(app) - margin - percentReserve;
+        MoveWindow(app.zoomSlider, margin, sliderY, std::max(0, sliderRight - margin), sliderHeight, TRUE);
+    }
 
     const RECT card = CalculateErrorCardRect(client.right, client.bottom, app.toolbarHeight, app.dpiScale);
     const int actionHeight = Scale(app, 32);
@@ -641,13 +748,23 @@ void LayoutControls(ViewerApp& app)
 
 }
 
+// Toggling the panel changes the viewport width (InfoPanelWidthPixels), so
+// it needs the same full relayout a resize would trigger.
+void ToggleInfoPanel(ViewerApp& app)
+{
+    if (!CanNavigate(app) || !ConsumeToggleCommand(app, ID_VIEW_INFO)) return;
+    app.infoPanelVisible = !app.infoPanelVisible;
+    LayoutControls(app);
+    UpdateGizmoLayout(app);
+    InvalidateRect(app.window, nullptr, FALSE);
+}
+
 void RecreateButtonFont(ViewerApp& app)
 {
     if (app.buttonFont) DeleteObject(app.buttonFont);
     app.buttonFont = CreateFontW(-Scale(app, 12), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
-    for (HWND button : { app.openButton, app.fitButton, app.resetButton, app.gridButton, app.axisSnapButton,
-        app.menuButton, app.retryButton, app.openAnotherButton, app.copyButton })
+    for (HWND button : { app.retryButton, app.openAnotherButton, app.copyButton })
     {
         if (button) SendMessageW(button, WM_SETFONT, reinterpret_cast<WPARAM>(app.buttonFont), TRUE);
     }
@@ -671,16 +788,16 @@ void AddTooltip(ViewerApp& app, HWND control, const wchar_t* text)
 
 void CreateControls(ViewerApp& app)
 {
-    app.openButton = CreateButton(app, ID_VIEW_OPEN, L"Open");
-    app.fitButton = CreateButton(app, ID_VIEW_FIT, L"Fit");
-    app.resetButton = CreateButton(app, ID_VIEW_RESET, L"Reset View");
-    app.gridButton = CreateButton(app, ID_VIEW_GRID, L"Grid");
-    app.axisSnapButton = CreateButton(app, ID_VIEW_AXIS_SNAP, L"Snap");
-    app.speedSlider = CreateWindowExW(0, L"msctls_trackbar32", L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-        0, 0, 10, 10, app.window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_VIEW_SPEED_SLIDER)), app.instance, nullptr);
-    SendMessageW(app.speedSlider, TBM_SETRANGE, TRUE, MAKELONG(0, kSpeedSliderMax));
-    SyncSpeedSlider(app);
-    app.menuButton = CreateButton(app, ID_VIEW_MENU, L"•••");
+    // Fit/Reset/Grid/Snap/Speed/Info/Share/Overflow/Open-With and the system
+    // min/max/close now live in the D2D-drawn title bar (Chrome +
+    // Renderer::DrawTitleBar) instead of as owner-drawn child buttons — see
+    // the WM_NCHITTEST/WM_LBUTTONDOWN handling in WindowProcedure. Only the
+    // bottom-bar zoom slider and the error-state action buttons remain real
+    // HWND controls.
+    app.zoomSlider = CreateWindowExW(0, L"msctls_trackbar32", L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+        0, 0, 10, 10, app.window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_VIEW_ZOOM_SLIDER)), app.instance, nullptr);
+    SendMessageW(app.zoomSlider, TBM_SETRANGE, TRUE, MAKELONG(0, kZoomSliderMax));
+    SyncZoomSlider(app);
     app.retryButton = CreateButton(app, ID_VIEW_RETRY, L"Retry");
     app.openAnotherButton = CreateButton(app, ID_VIEW_OPEN_ANOTHER, L"Open another");
     app.copyButton = CreateButton(app, ID_VIEW_COPY_DETAILS, L"Copy details");
@@ -688,13 +805,7 @@ void CreateControls(ViewerApp& app)
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, app.window, nullptr, app.instance, nullptr);
     SetWindowPos(app.tooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     SendMessageW(app.tooltip, TTM_SETMAXTIPWIDTH, 0, Scale(app, 360));
-    AddTooltip(app, app.openButton, L"Open a GLB model (Ctrl+O)");
-    AddTooltip(app, app.fitButton, L"Frame the model or the selection (F or Numpad .)");
-    AddTooltip(app, app.resetButton, L"Reset the view to the default framing (Home)");
-    AddTooltip(app, app.gridButton, L"Show or hide the ground grid (G)");
-    AddTooltip(app, app.axisSnapButton, L"Snap middle-drag travel to the nearest world axis");
-    AddTooltip(app, app.speedSlider, L"Travel speed (Shift while flying doubles it)");
-    AddTooltip(app, app.menuButton, L"More options and controls (Alt+M)");
+    AddTooltip(app, app.zoomSlider, L"Zoom (same as scroll-wheel or Ctrl+middle drag)");
     AddTooltip(app, app.retryButton, L"Try opening this file again");
     AddTooltip(app, app.openAnotherButton, L"Choose a different GLB model");
     AddTooltip(app, app.copyButton, L"Copy technical error details without the file path");
@@ -868,9 +979,10 @@ void ShowMoreMenu(ViewerApp& app)
     AppendMenuW(menu, MF_STRING, ID_VIEW_CONTROLS, L"Controls\t?");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About 3D Preview");
-    RECT button{};
-    GetWindowRect(app.menuButton, &button);
-    TrackPopupMenu(menu, TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON, button.right, button.bottom, 0, app.window, nullptr);
+    RECT button = app.chrome.Button(Chrome::Part::Overflow).rect;
+    POINT anchor{ button.right, button.bottom };
+    ClientToScreen(app.window, &anchor);
+    TrackPopupMenu(menu, TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON, anchor.x, anchor.y, 0, app.window, nullptr);
     DestroyMenu(menu);
 }
 
@@ -907,9 +1019,10 @@ void DrawOwnerButton(ViewerApp& app, const DRAWITEMSTRUCT& item)
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
     const bool focused = (item.itemState & ODS_FOCUS) != 0;
     const bool hot = (item.itemState & ODS_HOTLIGHT) != 0;
-    const bool primary = item.CtlID == ID_VIEW_OPEN || item.CtlID == ID_VIEW_RETRY;
-    const bool active = (item.CtlID == ID_VIEW_GRID && app.gridVisible) ||
-        (item.CtlID == ID_VIEW_AXIS_SNAP && app.axisSnapEnabled);
+    // Grid/Snap/Info/Fit/Reset/Open moved to the D2D title bar (Chrome +
+    // Renderer::DrawTitleBar); this now only draws the error-state buttons.
+    const bool primary = item.CtlID == ID_VIEW_RETRY;
+    const bool active = false;
     COLORREF fill = primary ? RGB(10, 132, 255) : RGB(58, 58, 60);
     COLORREF border = primary ? RGB(34, 146, 255) : RGB(73, 73, 76);
     COLORREF foreground = RGB(245, 245, 247);
@@ -964,12 +1077,18 @@ void HandleCommand(ViewerApp& app, int id)
     {
     case ID_VIEW_OPEN:
     case ID_VIEW_OPEN_ANOTHER: OpenDialog(app); break;
-    case ID_VIEW_FIT: FrameSelectedOrAll(app); break;
+    case ID_VIEW_FIT: FrameSelectedOrAll(app); SyncZoomSlider(app); break;
     case ID_VIEW_RESET:
-        if (app.renderer.HasModel()) { app.camera.Reset(ViewportAspect(app)); InvalidateRect(app.window, nullptr, FALSE); }
+        if (app.renderer.HasModel())
+        {
+            app.camera.Reset(ViewportAspect(app));
+            SyncZoomSlider(app);
+            InvalidateRect(app.window, nullptr, FALSE);
+        }
         break;
     case ID_VIEW_GRID: ToggleGrid(app); break;
     case ID_VIEW_AXIS_SNAP: ToggleAxisSnap(app); break;
+    case ID_VIEW_INFO: ToggleInfoPanel(app); break;
     case ID_VIEW_FRONT: SnapViewCommand(app, ViewDir::Front); break;
     case ID_VIEW_RIGHT: SnapViewCommand(app, ViewDir::Right); break;
     case ID_VIEW_TOP: SnapViewCommand(app, ViewDir::Top); break;
@@ -987,6 +1106,80 @@ void HandleCommand(ViewerApp& app, int id)
             L"About 3D Preview", MB_OK | MB_ICONINFORMATION);
         break;
     case IDM_EXIT: DestroyWindow(app.window); break;
+    }
+}
+
+// Builds a real "Open with..." popup menu from the system's recommended
+// handlers for the current file (ShellIntegration.h), plus the trailing
+// "Choose another app..." fallback, anchored under the Open With button.
+void ShowOpenWithMenu(ViewerApp& app)
+{
+    if (app.currentPath.empty()) return;
+    std::vector<OpenWithEntry> entries = EnumerateOpenWithHandlers(app.currentPath);
+    HMENU menu = CreatePopupMenu();
+    constexpr UINT kBaseId = 40000;
+    for (std::size_t index = 0; index < entries.size(); ++index)
+    {
+        AppendMenuW(menu, MF_STRING, kBaseId + static_cast<UINT>(index), entries[index].displayName.c_str());
+    }
+    RECT button = app.chrome.Button(Chrome::Part::OpenWith).rect;
+    POINT anchor{ button.left, button.bottom };
+    ClientToScreen(app.window, &anchor);
+    const int selected = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON,
+        anchor.x, anchor.y, 0, app.window, nullptr);
+    DestroyMenu(menu);
+    if (selected >= static_cast<int>(kBaseId) && static_cast<std::size_t>(selected - kBaseId) < entries.size())
+    {
+        entries[selected - kBaseId].invoke(app.currentPath);
+    }
+}
+
+void DoShare(ViewerApp& app)
+{
+    if (app.currentPath.empty()) return;
+    std::wstring error;
+    if (!ShowWindowsShare(app.window, app.currentPath, error))
+    {
+        ShowModeHud(app, L"Share isn't available right now");
+    }
+}
+
+void ToggleSpeedFlyout(ViewerApp& app)
+{
+    if (!CanNavigate(app)) return;
+    app.speedFlyoutOpen = !app.speedFlyoutOpen;
+    InvalidateRect(app.window, nullptr, FALSE);
+}
+
+// Dispatches a click on one of the D2D-drawn title-bar buttons (Chrome +
+// Renderer::DrawTitleBar). Reuses HandleCommand for the actions that already
+// have a command ID (kept working via Ctrl+O/accelerators too); the rest
+// (system menu, Speed flyout, Share, Open With) are new to the title bar.
+void HandleChromeAction(ViewerApp& app, Chrome::Part part)
+{
+    switch (part)
+    {
+    case Chrome::Part::SystemIcon:
+    {
+        HMENU systemMenu = GetSystemMenu(app.window, FALSE);
+        RECT iconRect = app.chrome.Button(Chrome::Part::SystemIcon).rect;
+        POINT anchor{ iconRect.left, iconRect.bottom };
+        ClientToScreen(app.window, &anchor);
+        const int command = TrackPopupMenu(systemMenu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+            anchor.x, anchor.y, 0, app.window, nullptr);
+        if (command) PostMessageW(app.window, WM_SYSCOMMAND, static_cast<WPARAM>(command), 0);
+        break;
+    }
+    case Chrome::Part::Grid: HandleCommand(app, ID_VIEW_GRID); break;
+    case Chrome::Part::AxisSnap: HandleCommand(app, ID_VIEW_AXIS_SNAP); break;
+    case Chrome::Part::Speed: ToggleSpeedFlyout(app); break;
+    case Chrome::Part::Fit: HandleCommand(app, ID_VIEW_FIT); break;
+    case Chrome::Part::Reset: HandleCommand(app, ID_VIEW_RESET); break;
+    case Chrome::Part::Info: HandleCommand(app, ID_VIEW_INFO); break;
+    case Chrome::Part::Share: DoShare(app); break;
+    case Chrome::Part::Overflow: HandleCommand(app, ID_VIEW_MENU); break;
+    case Chrome::Part::OpenWith: ShowOpenWithMenu(app); break;
+    default: break;
     }
 }
 
@@ -1017,7 +1210,7 @@ FlightInput BuildFlightInput(const ViewerApp& app)
     }
     RECT client{};
     GetClientRect(app.window, &client);
-    input.viewportHeight = static_cast<float>(std::max(1L, client.bottom - app.toolbarHeight));
+    input.viewportHeight = static_cast<float>(std::max(1L, client.bottom - app.toolbarHeight - EffectiveBottomBarHeight(app)));
     return input;
 }
 
@@ -1040,15 +1233,34 @@ void RenderScene(ViewerApp& app)
     overlay.animationPhase = static_cast<float>(GetTickCount64() % 1400) / 1400.0f;
     overlay.dpiScale = app.dpiScale;
     overlay.toolbarHeight = app.toolbarHeight;
+    overlay.bottomBarHeight = EffectiveBottomBarHeight(app);
+    overlay.infoPanelWidth = InfoPanelWidthPixels(app);
+    if (overlay.infoPanelWidth > 0 && app.loadedModel)
+    {
+        overlay.infoPanelSections = BuildInfoPanelSections(
+            app.loadedModel->stats, app.loadedModel->triangleCount, app.loadedModel->vertices.size());
+    }
+    overlay.zoomPercent = ZoomPercentFor(app.camera);
     overlay.hasModel = app.renderer.HasModel();
     overlay.gridVisible = app.gridVisible;
+    overlay.axisSnapEnabled = app.axisSnapEnabled;
+    overlay.infoPanelVisible = app.infoPanelVisible;
+    overlay.speedFlyoutOpen = app.speedFlyoutOpen && HasNavigableModel(app);
+    if (overlay.speedFlyoutOpen)
+    {
+        overlay.speedFlyoutRect = SpeedFlyoutRect(app);
+        overlay.speedFlyoutTrackRect = SpeedFlyoutTrackRect(app);
+        overlay.speedSliderT = static_cast<float>(SpeedSliderPositionFor(app.camera.FlySpeedScale())) / kSpeedSliderMax;
+        overlay.speedValueText = L"×" + FormatMultiplier(app.camera.FlySpeedScale());
+    }
     overlay.selectionAmount = app.meshSelected ? 1.0f : 0.0f;
     const double now = NowSeconds();
     overlay.speedHud = app.speedHudText;
     overlay.speedHudAlpha = static_cast<float>(HudAlpha(app.speedHudUntil, now));
     overlay.modeHud = app.modeHudText;
     overlay.modeHudAlpha = static_cast<float>(HudAlpha(app.modeHudUntil, now));
-    app.renderer.Render(app.camera, overlay, app.gizmo);
+    UpdateChromeLayout(app);
+    app.renderer.Render(app.camera, overlay, app.gizmo, app.chrome);
 }
 
 // Advances the camera by the wall-clock time since the last tick, from
@@ -1126,6 +1338,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         }
         CreateControls(*app);
         UpdateGizmoLayout(*app);
+        UpdateChromeLayout(*app);
         std::wstring renderError;
         app->rendererReady = app->renderer.Initialize(window, renderError);
         if (!app->rendererReady)
@@ -1138,6 +1351,115 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         if (!app->initialPath.empty() && app->rendererReady) BeginOpen(*app, app->initialPath);
         return 0;
     }
+    // --- Custom title bar: removes the native caption (WM_NCCALCSIZE) while
+    // keeping the resizable frame, then takes over hit-testing so our own
+    // D2D-drawn min/max/close (Chrome + Renderer::DrawTitleBar) behave like
+    // real caption buttons — including DWM's Snap Layout hover flyout on
+    // Maximize, via DwmDefWindowProc passthrough on every NC message below.
+    // Standard recipe for "client-area title bar with a real resizable
+    // frame" (same approach Windows Terminal uses).
+    case WM_NCCALCSIZE:
+        if (wParam)
+        {
+            NCCALCSIZE_PARAMS& params = *reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+            const LONG proposedTop = params.rgrc[0].top;
+            DefWindowProcW(window, message, wParam, lParam);
+            // Only the top inset (the native caption) is given back to the
+            // client area; DefWindowProc's left/right/bottom resize-border
+            // insets are kept so edge/corner resize still works below.
+            params.rgrc[0].top = proposedTop;
+            return 0;
+        }
+        // wParam == FALSE: lParam is a plain RECT* (the proposed window
+        // rect), sent only for the window's very first sizing at creation
+        // (later resizes/moves use the wParam==TRUE form above). Returning 0
+        // without touching it makes the client rect equal the full window
+        // rect, so the native caption never appears even for one frame.
+        return 0;
+    case WM_NCHITTEST:
+    {
+        LRESULT dwmResult = 0;
+        if (DwmDefWindowProc(window, message, wParam, lParam, &dwmResult)) return dwmResult;
+
+        const LRESULT defaultHit = DefWindowProcW(window, message, wParam, lParam);
+        // Outside the client-rendered title bar (including the thin resize
+        // border DefWindowProc still reports around the whole window), trust
+        // its own edge/corner result rather than overriding it.
+        if (defaultHit != HTCLIENT) return defaultHit;
+
+        POINT clientPoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(window, &clientPoint);
+        if (clientPoint.y >= app->toolbarHeight) return HTCLIENT;
+        switch (app->chrome.HitTest(clientPoint))
+        {
+        case Chrome::Part::Minimize: return HTMINBUTTON;
+        case Chrome::Part::Maximize: return HTMAXBUTTON;
+        case Chrome::Part::Close: return HTCLOSE;
+        case Chrome::Part::Caption: return HTCAPTION;
+        default: return HTCLIENT;
+        }
+    }
+    case WM_NCLBUTTONDOWN:
+    {
+        LRESULT dwmResult = 0;
+        if (DwmDefWindowProc(window, message, wParam, lParam, &dwmResult)) return dwmResult;
+        if (wParam == HTMINBUTTON || wParam == HTMAXBUTTON || wParam == HTCLOSE)
+        {
+            app->chrome.pressed = wParam == HTMINBUTTON ? Chrome::Part::Minimize
+                : wParam == HTMAXBUTTON ? Chrome::Part::Maximize : Chrome::Part::Close;
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+        break;
+    }
+    case WM_NCLBUTTONUP:
+    {
+        LRESULT dwmResult = 0;
+        if (DwmDefWindowProc(window, message, wParam, lParam, &dwmResult)) return dwmResult;
+        const Chrome::Part pressedPart = app->chrome.pressed;
+        app->chrome.pressed = Chrome::Part::None;
+        InvalidateRect(window, nullptr, FALSE);
+        if (wParam == HTMINBUTTON && pressedPart == Chrome::Part::Minimize) { ShowWindow(window, SW_MINIMIZE); return 0; }
+        if (wParam == HTMAXBUTTON && pressedPart == Chrome::Part::Maximize)
+        {
+            ShowWindow(window, IsZoomed(window) ? SW_RESTORE : SW_MAXIMIZE);
+            return 0;
+        }
+        if (wParam == HTCLOSE && pressedPart == Chrome::Part::Close) { DestroyWindow(window); return 0; }
+        break;
+    }
+    case WM_NCMOUSEMOVE:
+    {
+        LRESULT dwmResult = 0;
+        if (DwmDefWindowProc(window, message, wParam, lParam, &dwmResult)) return dwmResult;
+        Chrome::Part newHover = Chrome::Part::None;
+        if (wParam == HTMINBUTTON) newHover = Chrome::Part::Minimize;
+        else if (wParam == HTMAXBUTTON) newHover = Chrome::Part::Maximize;
+        else if (wParam == HTCLOSE) newHover = Chrome::Part::Close;
+        if (app->chrome.hover != newHover)
+        {
+            app->chrome.hover = newHover;
+            if (newHover != Chrome::Part::None)
+            {
+                TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE | TME_NONCLIENT, window, 0 };
+                TrackMouseEvent(&track);
+            }
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        break;
+    }
+    case WM_NCMOUSELEAVE:
+    {
+        LRESULT dwmResult = 0;
+        if (DwmDefWindowProc(window, message, wParam, lParam, &dwmResult)) return dwmResult;
+        if (app->chrome.hover == Chrome::Part::Minimize || app->chrome.hover == Chrome::Part::Maximize ||
+            app->chrome.hover == Chrome::Part::Close)
+        {
+            app->chrome.hover = Chrome::Part::None;
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        break;
+    }
     case WM_COMMAND:
         if (LOWORD(wParam) == ID_VIEW_OPEN_INITIAL) BeginOpen(*app, app->initialPath);
         else HandleCommand(*app, LOWORD(wParam));
@@ -1146,11 +1468,16 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         DrawOwnerButton(*app, *reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         return TRUE;
     case WM_HSCROLL:
-        if (reinterpret_cast<HWND>(lParam) == app->speedSlider && CanNavigate(*app))
+        if (reinterpret_cast<HWND>(lParam) == app->zoomSlider && CanNavigate(*app))
         {
-            const int position = static_cast<int>(SendMessageW(app->speedSlider, TBM_GETPOS, 0, 0));
-            app->camera.SetFlySpeedScale(SpeedForSliderPosition(position));
-            ShowSpeedHud(*app, L"Travel speed ×" + FormatMultiplier(app->camera.FlySpeedScale()));
+            // Direct manipulation: set distance immediately (no easing), so
+            // the view tracks the thumb 1:1 while dragging, unlike wheel
+            // zoom which eases toward targetDistance.
+            const int position = static_cast<int>(SendMessageW(app->zoomSlider, TBM_GETPOS, 0, 0));
+            const double distance = ZoomDistanceForSliderPosition(app->camera, position);
+            app->camera.distance = distance;
+            app->camera.targetDistance = distance;
+            InvalidateRect(window, nullptr, FALSE);
         }
         return 0;
     case WM_ERASEBKGND:
@@ -1170,6 +1497,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_SIZE:
         LayoutControls(*app);
         UpdateGizmoLayout(*app);
+        UpdateChromeLayout(*app);
         if (app->rendererReady && wParam != SIZE_MINIMIZED)
         {
             std::wstring resizeError;
@@ -1194,6 +1522,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         RecreateButtonFont(*app);
         LayoutControls(*app);
         UpdateGizmoLayout(*app);
+        UpdateChromeLayout(*app);
         InvalidateRect(window, nullptr, FALSE);
         return 0;
     }
@@ -1227,7 +1556,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         {
             const UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
             POINT point{};
-            if (GetClientPointerPoint(window, pointerId, point) && point.y >= app->toolbarHeight)
+            if (GetClientPointerPoint(window, pointerId, point) && PointInViewport(*app, point))
             {
                 SetFocus(window);
                 SetCapture(window);
@@ -1295,6 +1624,11 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 SetCursor(LoadCursorW(nullptr, IDC_HAND));
                 return TRUE;
             }
+            if (app->chrome.hover != Chrome::Part::None)
+            {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
         }
         break;
     case WM_MOUSELEAVE:
@@ -1303,9 +1637,50 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             app->gizmo.hover = NavGizmo::Part::None;
             InvalidateRect(window, nullptr, FALSE);
         }
+        // Min/Max/Close hover is owned by WM_NCMOUSELEAVE, not this.
+        if (app->chrome.hover != Chrome::Part::None && app->chrome.hover != Chrome::Part::Minimize &&
+            app->chrome.hover != Chrome::Part::Maximize && app->chrome.hover != Chrome::Part::Close)
+        {
+            app->chrome.hover = Chrome::Part::None;
+            InvalidateRect(window, nullptr, FALSE);
+        }
         return 0;
     case WM_LBUTTONDOWN:
-        if (GET_Y_LPARAM(lParam) >= app->toolbarHeight && CanNavigate(*app))
+    {
+        const POINT downPoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (app->speedFlyoutOpen)
+        {
+            const RECT track = SpeedFlyoutTrackRect(*app);
+            const RECT panel = SpeedFlyoutRect(*app);
+            RECT hitTrack = track;
+            InflateRect(&hitTrack, 0, Scale(*app, 8));
+            if (PtInRect(&hitTrack, downPoint))
+            {
+                SetCapture(window);
+                app->speedSliderDragging = true;
+                SetFlySpeedFromFlyoutX(*app, downPoint.x);
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+            app->speedFlyoutOpen = false;
+            InvalidateRect(window, nullptr, FALSE);
+            if (PtInRect(&panel, downPoint)) return 0;
+            // A click outside the panel closes it and still falls through,
+            // so clicking a different title-bar button both dismisses the
+            // flyout and performs that click in one action.
+        }
+        if (downPoint.y < app->toolbarHeight)
+        {
+            const Chrome::Part part = app->chrome.HitTest(downPoint);
+            if (part != Chrome::Part::None && part != Chrome::Part::Caption)
+            {
+                SetCapture(window);
+                app->chrome.pressed = part;
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+        }
+        if (PointInViewport(*app, POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) }) && CanNavigate(*app))
         {
             SetFocus(window);
             const POINT point{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -1344,8 +1719,9 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             }
         }
         return 0;
+    }
     case WM_MBUTTONDOWN:
-        if (GET_Y_LPARAM(lParam) >= app->toolbarHeight && CanNavigate(*app))
+        if (PointInViewport(*app, POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) }) && CanNavigate(*app))
         {
             SetFocus(window);
             SetCapture(window);
@@ -1364,7 +1740,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         }
         return 0;
     case WM_RBUTTONDOWN:
-        if (GET_Y_LPARAM(lParam) >= app->toolbarHeight && CanNavigate(*app))
+        if (PointInViewport(*app, POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) }) && CanNavigate(*app))
         {
             SetFocus(window);
             SetCapture(window);
@@ -1379,13 +1755,51 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         }
         return 0;
     case WM_MOUSEMOVE:
+    {
+        const POINT movePoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (app->speedSliderDragging)
+        {
+            if (GetCapture() == window) SetFlySpeedFromFlyoutX(*app, movePoint.x);
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+        if (app->chrome.pressed != Chrome::Part::None) return 0;
         if (app->pointerMode == PointerMode::None)
         {
-            // Idle hover tracking for the gizmo.
-            if (CanNavigate(*app) && GET_Y_LPARAM(lParam) >= app->toolbarHeight)
+            // Idle hover tracking: the title-bar action buttons above the
+            // viewport, the gizmo within it. (Min/Max/Close hover is tracked
+            // separately via WM_NCMOUSEMOVE, since those points are always
+            // non-client.)
+            if (movePoint.y < app->toolbarHeight)
+            {
+                const Chrome::Part hit = app->chrome.HitTest(movePoint);
+                const Chrome::Part effective = hit == Chrome::Part::Caption ? Chrome::Part::None : hit;
+                if (effective != app->chrome.hover)
+                {
+                    app->chrome.hover = effective;
+                    if (effective != Chrome::Part::None)
+                    {
+                        TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE, window, 0 };
+                        TrackMouseEvent(&track);
+                    }
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                if (app->gizmo.hover != NavGizmo::Part::None)
+                {
+                    app->gizmo.hover = NavGizmo::Part::None;
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                return 0;
+            }
+            if (app->chrome.hover != Chrome::Part::None)
+            {
+                app->chrome.hover = Chrome::Part::None;
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            if (CanNavigate(*app) && PointInViewport(*app, movePoint))
             {
                 const NavGizmo::Part part = app->gizmo.HitTest(app->camera.Orientation(),
-                    static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam)));
+                    static_cast<float>(movePoint.x), static_cast<float>(movePoint.y));
                 if (part != app->gizmo.hover)
                 {
                     app->gizmo.hover = part;
@@ -1447,7 +1861,27 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             InvalidateRect(window, nullptr, FALSE);
         }
         return 0;
+    }
     case WM_LBUTTONUP:
+        if (app->speedSliderDragging)
+        {
+            app->speedSliderDragging = false;
+            if (GetCapture() == window) ReleaseCapture();
+            return 0;
+        }
+        if (app->chrome.pressed != Chrome::Part::None)
+        {
+            const POINT upPoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            const Chrome::Part pressedPart = app->chrome.pressed;
+            app->chrome.pressed = Chrome::Part::None;
+            if (GetCapture() == window) ReleaseCapture();
+            InvalidateRect(window, nullptr, FALSE);
+            if (upPoint.y < app->toolbarHeight && app->chrome.HitTest(upPoint) == pressedPart)
+            {
+                HandleChromeAction(*app, pressedPart);
+            }
+            return 0;
+        }
         if (app->pointerMode == PointerMode::Orbit && !app->selectDragged && CanNavigate(*app) &&
             NowSeconds() - app->selectDownSeconds < kClickMaxSeconds)
         {
@@ -1476,9 +1910,10 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         EndPointer(*app);
         return 0;
     case WM_LBUTTONDBLCLK:
-        if (GET_Y_LPARAM(lParam) >= app->toolbarHeight && CanNavigate(*app))
+        if (PointInViewport(*app, POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) }) && CanNavigate(*app))
         {
             FrameSelectedOrAll(*app);
+            SyncZoomSlider(*app);
         }
         return 0;
     case WM_MOUSEWHEEL:
@@ -1489,6 +1924,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             else
             {
                 app->camera.Dolly(steps);
+                SyncZoomSlider(*app);
                 InvalidateRect(window, nullptr, FALSE);
             }
         }
@@ -1528,6 +1964,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         if (wParam == VK_OEM_PLUS || wParam == VK_ADD) app->camera.Dolly(1.0f);
         else if (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT) app->camera.Dolly(-1.0f);
         else break;
+        SyncZoomSlider(*app);
         InvalidateRect(window, nullptr, FALSE);
         return 0;
     case WM_KEYUP:
@@ -1536,6 +1973,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_KILLFOCUS:
         StopNavigation(*app);
         EndPointer(*app);
+        if (app->speedFlyoutOpen) { app->speedFlyoutOpen = false; InvalidateRect(window, nullptr, FALSE); }
         return 0;
     case WM_CONTEXTMENU:
         return 0;
@@ -1573,6 +2011,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 L" triangles  •  LMB orbit · MMB truck · RMB+WASD fly";
             app->status = app->readyStatus;
             app->camera.SetBounds(complete->result.model->boundsMin, complete->result.model->boundsMax, ViewportAspect(*app));
+            SyncZoomSlider(*app);
             app->state = ViewerState::Ready;
             app->failedPath.clear();
             app->errorSummary.clear();

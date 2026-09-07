@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Chrome.h"
+#include "InfoPanel.h"
 #include "Model.h"
 #include "NavGizmo.h"
 
@@ -8,6 +10,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 // Vertical field of view shared by the camera math, framing, and picking.
 constexpr float kVerticalFieldOfView = DirectX::XM_PIDIV4;
@@ -37,8 +40,19 @@ struct OverlayInfo
     float animationPhase = 0.0f;
     float dpiScale = 1.0f;
     int toolbarHeight = 40;
+    int bottomBarHeight = 0;
+    int infoPanelWidth = 0;   // 0 when the Information panel is closed
+    std::vector<InfoPanelSection> infoPanelSections;   // only meaningful while infoPanelWidth > 0
+    float zoomPercent = 100.0f;   // 100 == the default Fit framing distance
     bool hasModel = false;
     bool gridVisible = true;
+    bool axisSnapEnabled = false;
+    bool infoPanelVisible = false;
+    bool speedFlyoutOpen = false;
+    RECT speedFlyoutRect{};        // client px, valid only while speedFlyoutOpen
+    RECT speedFlyoutTrackRect{};   // the draggable track within it
+    float speedSliderT = 0.0f;     // 0..1 normalized thumb position
+    std::wstring speedValueText;   // e.g. "×1.00"
     float selectionAmount = 0.0f;   // 0..1 mesh-selection highlight
     std::wstring speedHud;          // transient fly-speed readout
     float speedHudAlpha = 0.0f;
@@ -190,7 +204,7 @@ public:
     bool Resize(int width, int height, std::wstring& error);
     bool UploadModel(const ModelData& model, std::wstring& error);
     void ClearModel();
-    void Render(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo);
+    void Render(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo, const Chrome& chrome);
     bool HasModel() const;
 
 private:

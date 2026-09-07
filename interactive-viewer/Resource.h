@@ -31,6 +31,8 @@
 #define ID_VIEW_PROJECTION      32786
 #define ID_VIEW_AXIS_SNAP       32787
 #define ID_VIEW_SPEED_SLIDER    32788
+#define ID_VIEW_INFO            32789
+#define ID_VIEW_ZOOM_SLIDER     32790
 #ifndef IDC_STATIC
 #define IDC_STATIC				-1
 #endif
@@ -41,7 +43,7 @@
 
 #define _APS_NO_MFC					130
 #define _APS_NEXT_RESOURCE_VALUE	129
-#define _APS_NEXT_COMMAND_VALUE		32789
+#define _APS_NEXT_COMMAND_VALUE		32791
 #define _APS_NEXT_CONTROL_VALUE		1000
 #define _APS_NEXT_SYMED_VALUE		110
 #endif

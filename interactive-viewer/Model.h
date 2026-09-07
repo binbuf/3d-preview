@@ -16,6 +16,45 @@ struct ModelVertex
     DirectX::XMFLOAT4 color{ 1.0f, 1.0f, 1.0f, 1.0f };
 };
 
+// Scanned (not rendered) glTF/GLB metadata for the Information side panel. All of
+// this comes from cheap lookups against the already-parsed glTF JSON — none of it
+// requires decoding texture pixels or implementing animation/skinning playback,
+// which stay deliberately out of scope for this preview slice (see README.md).
+struct ModelStats
+{
+    // Mesh Data
+    bool hasUv0 = false;
+    bool hasUv1 = false;
+    bool hasVertexColors = false;
+    int materialCount = 0;
+
+    // Texture Data: how many materials reference each PBR texture slot. glTF
+    // packs metallic (B) and roughness (G) into one `metallicRoughnessTexture`,
+    // so that single count stands in for both Specular/Metallic and
+    // Gloss/Roughness. `hasConstant*` flags a factor-only (untextured) value
+    // for the fields that have no natural "count" of their own.
+    int albedoTextureCount = 0;
+    int normalTextureCount = 0;
+    int specularMetallicTextureCount = 0;
+    int occlusionTextureCount = 0;
+    int emissiveTextureCount = 0;
+    bool hasConstantBaseColor = false;
+    bool hasConstantEmissiveColor = false;
+    bool hasConstantSpecularColor = false;
+    bool hasTransparency = false;   // alphaMode != OPAQUE, or a base color factor alpha < 1
+
+    // Animation Data
+    int animationCount = 0;
+    int skinCount = 0;
+    int boneCount = 0;   // total joints across all skins (glTF has no separate "bone" concept)
+
+    // Performance Data
+    int drawCallCount = 0;
+
+    // Scene Data
+    int nodeCount = 0;
+};
+
 struct ModelData
 {
     std::vector<ModelVertex> vertices;
@@ -24,6 +63,7 @@ struct ModelData
     DirectX::XMFLOAT3 boundsMax{};
     std::uint64_t triangleCount = 0;
     std::wstring warning;
+    ModelStats stats;
 };
 
 struct LoadResult

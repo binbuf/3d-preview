@@ -18,6 +18,15 @@ file registration, caching, streaming/LOD infrastructure, and broader format sup
 - eased wheel zoom, Fit/Reset camera glides, quaternion orientation without gimbal lock, distance-aware
   flight speed, and transient speed/mode HUD readouts
 - DPI-aware dark native UI, keyboard-reachable controls, tooltips, and a neutral studio/grid render
+- a Windows 11 Photos-style unified title bar (custom `WM_NCCALCSIZE`/`WM_NCHITTEST` non-client
+  handling, with `DwmDefWindowProc` passthrough so Snap Layout hover-on-maximize still works) holding
+  the file name, Grid/Snap/Speed/Fit/Reset/Info/Share/Open-With actions, and the system
+  minimize/maximize/close in one row
+- a Photos-style bottom bar with a zoom slider synced to camera distance, and live-updating "Stats &
+  Shading" Information side panel (mesh/texture/animation/performance/scene counts scanned from the
+  glTF JSON) toggled from the title bar
+- Open With (real system-recommended handlers via `SHAssocEnumHandlers`, plus "Choose another app...")
+  and Windows Share (`DataTransferManager`/C++WinRT) for the currently open file
 
 ## Deliberately deferred
 
@@ -35,16 +44,21 @@ ambiguous partial result.
 | Pan | Shift+middle drag or Shift+arrow keys |
 | Fly (Unreal) | Hold right mouse + `W`/`A`/`S`/`D`, `Q`/`E` |
 | Roll | Hold right mouse + `Z`/`C` |
-| Fly faster | Hold right mouse + `Shift`; wheel sets speed |
-| Zoom | Wheel, `+`, `-`, or Ctrl+middle drag |
+| Fly faster | Hold right mouse + `Shift`; wheel, Speed flyout, or `+`/`-` sets speed |
+| Zoom | Wheel, `+`, `-`, Ctrl+middle drag, or the bottom-bar zoom slider |
 | Front / Right / Top view | Numpad `1` / `3` / `7` (Ctrl for reverse) |
 | Perspective / Orthographic | Numpad `5` |
 | Gizmo view snap | Click an axis ball in the corner gizmo |
-| Frame model / selection | `F`, Numpad `.`, Fit button, or double-click |
-| Ground grid | `G` / `Shift+Alt+G` / Grid button |
-| Reset view | `Home` or `R` |
-| Open | `Ctrl+O` |
+| Frame model / selection | `F`, Numpad `.`, the title bar's Fit button, or double-click |
+| Ground grid | `G` / `Shift+Alt+G` / the title bar's Grid button |
+| Axis-snap truck | The title bar's Snap button |
+| Model information | The title bar's Info button (opens the Stats & Shading side panel) |
+| Share the open file | The title bar's Share button (Windows Share) |
+| Open the file in another app | The title bar's Open With dropdown |
+| Reset view | `Home` or `R`, or the title bar's Reset button |
+| Open | `Ctrl+O` (primarily launched via file-type registration or drag/drop instead) |
 | Cancel open | `Esc` |
+| Minimize / maximize / restore / close | The title bar's own buttons (top-right) |
 
 Camera motion is time-corrected and eased: flight ramps up and settles instead of stepping, wheel
 zoom and Fit/Reset glide to their destination, drags carry exponential inertia, and view snaps
