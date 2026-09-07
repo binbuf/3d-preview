@@ -27,16 +27,17 @@ void Chrome::UpdateLayout(int clientWidth, int titleBarHeight, float dpiScale, b
     isMaximized_ = isMaximized;
 
     const int margin = Scale(10, dpiScale);
-    const int gap = Scale(4, dpiScale);
     const int sysButtonWidth = Scale(46, dpiScale);
-    const int actionGap = Scale(6, dpiScale);
+    const int actionGap = Scale(4, dpiScale);
     const int actionHeight = Scale(30, dpiScale);
     const int actionY = (titleBarHeight - actionHeight) / 2;
 
     // System caption buttons: rightmost, full title-bar height (matches the
     // real caption buttons' hit target so DWM's Snap Layout hover flyout on
     // Maximize feels native). `isMaximized` only affects the drawn glyph
-    // (Renderer::DrawTitleBar), not this layout.
+    // (Renderer::DrawTitleBar), not this layout. Always visible/enabled —
+    // even while a model is still loading — so the window can always be
+    // minimized, maximized, and closed.
     int right = clientWidth;
     close_.rect = MakeRect(right - sysButtonWidth, 0, sysButtonWidth, titleBarHeight); right -= sysButtonWidth;
     maximize_.rect = MakeRect(right - sysButtonWidth, 0, sysButtonWidth, titleBarHeight); right -= sysButtonWidth;
@@ -47,41 +48,35 @@ void Chrome::UpdateLayout(int clientWidth, int titleBarHeight, float dpiScale, b
 
     right -= margin;
 
-    const int openWithWidth = Scale(96, dpiScale);
-    openWith_.rect = MakeRect(right - openWithWidth, actionY, openWithWidth, actionHeight); right -= openWithWidth + actionGap;
-
-    const int overflowWidth = Scale(38, dpiScale);
-    overflow_.rect = MakeRect(right - overflowWidth, actionY, overflowWidth, actionHeight); right -= overflowWidth + gap;
-    overflow_.enabled = overflow_.visible = true;
+    // Right-anchored group: Open With, just left of the caption buttons.
+    const int openWithWidth = Scale(72, dpiScale);
+    openWith_.rect = MakeRect(right - openWithWidth, actionY, openWithWidth, actionHeight); right -= openWithWidth;
     openWith_.enabled = openWith_.visible = hasModel;
-
-    struct Entry { ButtonState* state; int width; };
-    const int shareWidth = Scale(56, dpiScale);
-    const int infoWidth = Scale(48, dpiScale);
-    const int resetWidth = Scale(58, dpiScale);
-    const int fitWidth = Scale(44, dpiScale);
-    const int speedWidth = Scale(52, dpiScale);
-    const int snapWidth = Scale(52, dpiScale);
-    const int gridWidth = Scale(48, dpiScale);
-    const Entry entries[] = {
-        { &share_, shareWidth }, { &info_, infoWidth }, { &reset_, resetWidth }, { &fit_, fitWidth },
-        { &speed_, speedWidth }, { &axisSnap_, snapWidth }, { &grid_, gridWidth },
-    };
-    for (const Entry& entry : entries)
-    {
-        entry.state->rect = MakeRect(right - entry.width, actionY, entry.width, actionHeight);
-        right -= entry.width + actionGap;
-        entry.state->enabled = entry.state->visible = hasModel;
-    }
 
     const int rightGroupStart = right - margin;
 
-    const int iconSize = Scale(28, dpiScale);
-    systemIcon_.rect = MakeRect(margin, (titleBarHeight - iconSize) / 2, iconSize, iconSize);
-    systemIcon_.enabled = systemIcon_.visible = true;
+    // Left-anchored group: Grid, Snap, Speed, Fit, Reset, Share, Overflow —
+    // small square icon buttons, in that order.
+    struct Entry { ButtonState* state; int width; };
+    const int iconButtonWidth = Scale(40, dpiScale);
+    const int overflowWidth = Scale(34, dpiScale);
+    const Entry entries[] = {
+        { &grid_, iconButtonWidth }, { &axisSnap_, iconButtonWidth }, { &speed_, iconButtonWidth },
+        { &fit_, iconButtonWidth }, { &reset_, iconButtonWidth }, { &share_, iconButtonWidth },
+        { &overflow_, overflowWidth },
+    };
+    int left = margin;
+    for (const Entry& entry : entries)
+    {
+        entry.state->rect = MakeRect(left, actionY, entry.width, actionHeight);
+        left += entry.width + actionGap;
+        entry.state->enabled = entry.state->visible = hasModel;
+    }
+    // Controls/warnings/About don't need a model loaded.
+    overflow_.enabled = overflow_.visible = true;
 
-    const int filenameLeft = margin + iconSize + margin;
-    filenameRect_ = RECT{ std::min(filenameLeft, rightGroupStart), 0, std::max(filenameLeft, rightGroupStart), titleBarHeight };
+    const int leftGroupEnd = left - actionGap + margin;
+    filenameRect_ = RECT{ std::min(leftGroupEnd, rightGroupStart), 0, std::max(leftGroupEnd, rightGroupStart), titleBarHeight };
 }
 
 Chrome::Part Chrome::HitTest(POINT clientPoint) const
@@ -91,8 +86,8 @@ Chrome::Part Chrome::HitTest(POINT clientPoint) const
     const struct { Part part; const ButtonState* state; } candidates[] = {
         { Part::Close, &close_ }, { Part::Maximize, &maximize_ }, { Part::Minimize, &minimize_ },
         { Part::OpenWith, &openWith_ }, { Part::Overflow, &overflow_ }, { Part::Share, &share_ },
-        { Part::Info, &info_ }, { Part::Reset, &reset_ }, { Part::Fit, &fit_ }, { Part::Speed, &speed_ },
-        { Part::AxisSnap, &axisSnap_ }, { Part::Grid, &grid_ }, { Part::SystemIcon, &systemIcon_ },
+        { Part::Reset, &reset_ }, { Part::Fit, &fit_ }, { Part::Speed, &speed_ },
+        { Part::AxisSnap, &axisSnap_ }, { Part::Grid, &grid_ },
     };
     for (const auto& candidate : candidates)
     {
@@ -108,19 +103,17 @@ const Chrome::ButtonState& Chrome::Button(Part part) const
 {
     switch (part)
     {
-    case Part::SystemIcon: return systemIcon_;
     case Part::Grid: return grid_;
     case Part::AxisSnap: return axisSnap_;
     case Part::Speed: return speed_;
     case Part::Fit: return fit_;
     case Part::Reset: return reset_;
-    case Part::Info: return info_;
     case Part::Share: return share_;
     case Part::Overflow: return overflow_;
     case Part::OpenWith: return openWith_;
     case Part::Minimize: return minimize_;
     case Part::Maximize: return maximize_;
     case Part::Close: return close_;
-    default: return systemIcon_;
+    default: return overflow_;
     }
 }

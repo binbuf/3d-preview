@@ -19,12 +19,16 @@ file registration, caching, streaming/LOD infrastructure, and broader format sup
   flight speed, and transient speed/mode HUD readouts
 - DPI-aware dark native UI, keyboard-reachable controls, tooltips, and a neutral studio/grid render
 - a Windows 11 Photos-style unified title bar (custom `WM_NCCALCSIZE`/`WM_NCHITTEST` non-client
-  handling, with `DwmDefWindowProc` passthrough so Snap Layout hover-on-maximize still works) holding
-  the file name, Grid/Snap/Speed/Fit/Reset/Info/Share/Open-With actions, and the system
-  minimize/maximize/close in one row
-- a Photos-style bottom bar with a zoom slider synced to camera distance, and live-updating "Stats &
-  Shading" Information side panel (mesh/texture/animation/performance/scene counts scanned from the
-  glTF JSON) toggled from the title bar
+  handling, with `DwmDefWindowProc` passthrough so Snap Layout hover-on-maximize still works): icon
+  action buttons (Grid/Snap/Speed/Fit/Reset/Share/•••) on the left, the centered file name, and
+  Open-With plus the system minimize/maximize/close on the right — the caption buttons stay usable
+  even before a model finishes loading
+- a Photos-style bottom bar (shown once a model is loaded) with the Information toggle, a zoom slider
+  synced to camera distance, and a Fullscreen toggle (also `F11`) that expands the window edge-to-edge
+  over its monitor — above the taskbar and with the title bar/bottom bar hidden so the viewport fills
+  the whole screen — distinct from Maximize, which snaps to the work area and keeps the taskbar and
+  our own chrome visible; `Esc` (or `F11` again) restores the window; live-updating "Stats & Shading"
+  Information side panel (mesh/texture/animation/performance/scene counts scanned from the glTF JSON)
 - Open With (real system-recommended handlers via `SHAssocEnumHandlers`, plus "Choose another app...")
   and Windows Share (`DataTransferManager`/C++WinRT) for the currently open file
 
@@ -52,12 +56,13 @@ ambiguous partial result.
 | Frame model / selection | `F`, Numpad `.`, the title bar's Fit button, or double-click |
 | Ground grid | `G` / `Shift+Alt+G` / the title bar's Grid button |
 | Axis-snap truck | The title bar's Snap button |
-| Model information | The title bar's Info button (opens the Stats & Shading side panel) |
+| Model information | The bottom bar's Info button (opens the Stats & Shading side panel) |
 | Share the open file | The title bar's Share button (Windows Share) |
 | Open the file in another app | The title bar's Open With dropdown |
 | Reset view | `Home` or `R`, or the title bar's Reset button |
 | Open | `Ctrl+O` (primarily launched via file-type registration or drag/drop instead) |
-| Cancel open | `Esc` |
+| Fullscreen | `F11` or the bottom bar's Fullscreen button |
+| Cancel open / exit fullscreen | `Esc` |
 | Minimize / maximize / restore / close | The title bar's own buttons (top-right) |
 
 Camera motion is time-corrected and eased: flight ramps up and settles instead of stepping, wheel

@@ -13,6 +13,10 @@
 // Renderer::DrawTitleBar consumes this class's rects to paint the D2D content;
 // Preview3D.cpp's WM_NCHITTEST/WM_LBUTTONDOWN handlers consume HitTest to route
 // input. All rects are in client pixel coordinates.
+//
+// Layout, left to right: the navigation action buttons (Grid/Snap/Speed/
+// Fit/Reset/Share/Overflow), an empty drag strip, the centered filename, more
+// empty drag strip, then Open With and the system min/max/close.
 class Chrome
 {
 public:
@@ -20,13 +24,11 @@ public:
     {
         None,
         Caption,       // empty drag strip
-        SystemIcon,    // top-left icon: opens the system menu
         Grid,
         AxisSnap,
         Speed,
         Fit,
         Reset,
-        Info,
         Share,
         Overflow,      // "..." menu (Controls/warnings/About)
         OpenWith,
@@ -43,8 +45,9 @@ public:
     };
 
     // Recomputes every button rect for the current client width and DPI.
-    // `hasModel` hides the navigation-only buttons (Grid/Snap/Speed/Fit/Reset)
-    // the same way the old toolbar disabled them with nothing loaded.
+    // `hasModel` hides the navigation-only buttons (Grid/Snap/Speed/Fit/Reset/
+    // Share) the same way the old toolbar disabled them with nothing loaded;
+    // Overflow stays available regardless (Controls/About don't need a model).
     void UpdateLayout(int clientWidth, int titleBarHeight, float dpiScale, bool hasModel, bool isMaximized);
 
     // Hit-tests a CLIENT-coordinate point (already converted from screen
@@ -65,13 +68,11 @@ private:
     RECT titleBarRect_{};
     RECT filenameRect_{};
     bool isMaximized_ = false;
-    ButtonState systemIcon_;
     ButtonState grid_;
     ButtonState axisSnap_;
     ButtonState speed_;
     ButtonState fit_;
     ButtonState reset_;
-    ButtonState info_;
     ButtonState share_;
     ButtonState overflow_;
     ButtonState openWith_;

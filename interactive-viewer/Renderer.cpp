@@ -22,6 +22,205 @@ float Scale(float value, float dpiScale)
     return std::round(value * dpiScale);
 }
 
+// Vector glyphs for the toolbar/status-bar icon buttons — hand-drawn with
+// plain D2D primitives (lines/ellipses/rectangles) rather than a bitmap
+// asset, so they stay pixel-crisp at any DPI and need no image-loading
+// pipeline, matching how the system caption glyphs (DrawTitleBar) and the
+// NavGizmo axis balls are already drawn.
+enum class IconKind
+{
+    Grid,
+    AxisSnap,
+    Speed,
+    Fit,
+    Reset,
+    Share,
+    Overflow,
+    OpenWith,
+    Info,
+    FullscreenEnter,
+    FullscreenExit,
+};
+
+// Four L-shaped corner brackets around (cx, cy). `vertexRadius` is where each
+// bracket's corner sits and `armEndRadius` is how far its two arms reach;
+// vertexRadius > armEndRadius points the brackets inward (Fit / enter
+// fullscreen, brackets at the outer edge closing toward the middle) while
+// vertexRadius < armEndRadius points them outward (exit fullscreen, brackets
+// near the middle opening toward the edge).
+void DrawCornerBrackets(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, float cx, float cy,
+    float vertexRadius, float armEndRadius, float strokeWidth)
+{
+    for (float sx : { -1.0f, 1.0f })
+    {
+        for (float sy : { -1.0f, 1.0f })
+        {
+            const D2D1_POINT_2F vertex{ cx + sx * vertexRadius, cy + sy * vertexRadius };
+            target->DrawLine(vertex, D2D1::Point2F(cx + sx * armEndRadius, cy + sy * vertexRadius), brush, strokeWidth);
+            target->DrawLine(vertex, D2D1::Point2F(cx + sx * vertexRadius, cy + sy * armEndRadius), brush, strokeWidth);
+        }
+    }
+}
+
+void DrawIcon(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, IconKind kind, D2D1_RECT_F rect, float scale)
+{
+    const float cx = (rect.left + rect.right) * 0.5f;
+    const float cy = (rect.top + rect.bottom) * 0.5f;
+    const float stroke = Scale(1.4f, scale);
+    switch (kind)
+    {
+    case IconKind::Grid:
+    {
+        const float half = Scale(7.0f, scale);
+        target->DrawRectangle(D2D1::RectF(cx - half, cy - half, cx + half, cy + half), brush, stroke);
+        target->DrawLine(D2D1::Point2F(cx, cy - half), D2D1::Point2F(cx, cy + half), brush, stroke);
+        target->DrawLine(D2D1::Point2F(cx - half, cy), D2D1::Point2F(cx + half, cy), brush, stroke);
+        break;
+    }
+    case IconKind::AxisSnap:
+    {
+        // Target/crosshair with four tick marks poking outside the ring.
+        const float radius = Scale(5.5f, scale);
+        target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius), brush, stroke);
+        const float tickOuter = radius + Scale(3.0f, scale);
+        const float tickInner = radius - Scale(1.5f, scale);
+        target->DrawLine(D2D1::Point2F(cx, cy - tickOuter), D2D1::Point2F(cx, cy - tickInner), brush, stroke);
+        target->DrawLine(D2D1::Point2F(cx, cy + tickInner), D2D1::Point2F(cx, cy + tickOuter), brush, stroke);
+        target->DrawLine(D2D1::Point2F(cx - tickOuter, cy), D2D1::Point2F(cx - tickInner, cy), brush, stroke);
+        target->DrawLine(D2D1::Point2F(cx + tickInner, cy), D2D1::Point2F(cx + tickOuter, cy), brush, stroke);
+        break;
+    }
+    case IconKind::Speed:
+    {
+        // Speedometer: an upper-half-circle gauge face with a needle.
+        const float radius = Scale(6.5f, scale);
+        const float baseY = cy + Scale(1.5f, scale);
+        constexpr int segments = 10;
+        D2D1_POINT_2F previous{};
+        for (int i = 0; i <= segments; ++i)
+        {
+            const float t = static_cast<float>(i) / segments;
+            const float angle = XM_PI + t * XM_PI;
+            const D2D1_POINT_2F point{ cx + std::cos(angle) * radius, baseY + std::sin(angle) * radius };
+            if (i > 0) target->DrawLine(previous, point, brush, stroke);
+            previous = point;
+        }
+        constexpr float needleAngle = -XM_PIDIV2 + 0.75f;
+        target->DrawLine(D2D1::Point2F(cx, baseY),
+            D2D1::Point2F(cx + std::cos(needleAngle) * radius * 0.8f, baseY + std::sin(needleAngle) * radius * 0.8f),
+            brush, stroke);
+        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, baseY), Scale(1.3f, scale), Scale(1.3f, scale)), brush);
+        break;
+    }
+    case IconKind::Fit:
+    {
+        // A picture-frame with a small mountain silhouette inside, reading as
+        // "frame the subject" — deliberately distinct from the corner-bracket
+        // expand glyph used for Fullscreen (below) so the two read as separate
+        // actions instead of duplicates.
+        const float halfW = Scale(7.5f, scale);
+        const float halfH = Scale(6.0f, scale);
+        target->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx - halfW, cy - halfH, cx + halfW, cy + halfH),
+            Scale(2.0f, scale), Scale(2.0f, scale)), brush, stroke);
+        const float baseY = cy + halfH - Scale(1.5f, scale);
+        const D2D1_POINT_2F peak{ cx - Scale(1.0f, scale), cy - Scale(1.0f, scale) };
+        const D2D1_POINT_2F left{ cx - halfW + Scale(2.0f, scale), baseY };
+        const D2D1_POINT_2F right{ cx + halfW - Scale(2.0f, scale), baseY };
+        target->DrawLine(left, peak, brush, stroke);
+        target->DrawLine(peak, right, brush, stroke);
+        target->DrawLine(left, right, brush, stroke);
+        break;
+    }
+    case IconKind::FullscreenEnter:
+        DrawCornerBrackets(target, brush, cx, cy, Scale(6.5f, scale), Scale(3.2f, scale), stroke);
+        break;
+    case IconKind::FullscreenExit:
+        DrawCornerBrackets(target, brush, cx, cy, Scale(2.6f, scale), Scale(6.5f, scale), stroke);
+        break;
+    case IconKind::Reset:
+    {
+        // Circular refresh arrow: a ~280-degree arc with an arrowhead at the
+        // trailing end, tangent to the direction of travel.
+        const float radius = Scale(6.5f, scale);
+        constexpr int segments = 12;
+        constexpr float startAngle = -XM_PIDIV2 - 0.35f;
+        constexpr float sweep = XM_2PI * 0.78f;
+        D2D1_POINT_2F previous{};
+        D2D1_POINT_2F tip{};
+        float tipAngle = 0.0f;
+        for (int i = 0; i <= segments; ++i)
+        {
+            const float t = static_cast<float>(i) / segments;
+            const float angle = startAngle + t * sweep;
+            const D2D1_POINT_2F point{ cx + std::cos(angle) * radius, cy + std::sin(angle) * radius };
+            if (i > 0) target->DrawLine(previous, point, brush, stroke);
+            previous = point;
+            tip = point;
+            tipAngle = angle;
+        }
+        const float tangent = tipAngle + XM_PIDIV2;
+        const float headSize = Scale(3.2f, scale);
+        for (float sign : { -1.0f, 1.0f })
+        {
+            const float headAngle = tangent + XM_PI + sign * 0.55f;
+            target->DrawLine(tip, D2D1::Point2F(tip.x + std::cos(headAngle) * headSize, tip.y + std::sin(headAngle) * headSize),
+                brush, stroke);
+        }
+        break;
+    }
+    case IconKind::Info:
+    {
+        const float radius = Scale(7.0f, scale);
+        target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius), brush, stroke);
+        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy - radius * 0.42f), Scale(1.15f, scale), Scale(1.15f, scale)), brush);
+        target->DrawLine(D2D1::Point2F(cx, cy - radius * 0.02f), D2D1::Point2F(cx, cy + radius * 0.5f), brush, Scale(1.7f, scale));
+        break;
+    }
+    case IconKind::Share:
+    {
+        const float halfW = Scale(6.0f, scale);
+        const float boxTop = cy + Scale(1.0f, scale);
+        const float boxBottom = cy + Scale(6.5f, scale);
+        target->DrawLine(D2D1::Point2F(cx - halfW, boxTop), D2D1::Point2F(cx - halfW, boxBottom), brush, stroke);
+        target->DrawLine(D2D1::Point2F(cx + halfW, boxTop), D2D1::Point2F(cx + halfW, boxBottom), brush, stroke);
+        target->DrawLine(D2D1::Point2F(cx - halfW, boxBottom), D2D1::Point2F(cx + halfW, boxBottom), brush, stroke);
+        const float arrowTop = cy - Scale(7.0f, scale);
+        target->DrawLine(D2D1::Point2F(cx, boxTop + Scale(0.5f, scale)), D2D1::Point2F(cx, arrowTop), brush, stroke);
+        const float headSize = Scale(3.0f, scale);
+        target->DrawLine(D2D1::Point2F(cx, arrowTop), D2D1::Point2F(cx - headSize, arrowTop + headSize), brush, stroke);
+        target->DrawLine(D2D1::Point2F(cx, arrowTop), D2D1::Point2F(cx + headSize, arrowTop + headSize), brush, stroke);
+        break;
+    }
+    case IconKind::Overflow:
+    {
+        const float dotRadius = Scale(1.6f, scale);
+        const float gapX = Scale(5.0f, scale);
+        for (float i : { -1.0f, 0.0f, 1.0f })
+            target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx + i * gapX, cy), dotRadius, dotRadius), brush);
+        break;
+    }
+    case IconKind::OpenWith:
+    {
+        const float half = Scale(4.6f, scale);
+        const float boxCx = cx - Scale(6.0f, scale);
+        const float boxCy = cy + Scale(1.0f, scale);
+        target->DrawRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(boxCx - half, boxCy - half, boxCx + half, boxCy + half), Scale(1.5f, scale), Scale(1.5f, scale)),
+            brush, stroke);
+        const D2D1_POINT_2F arrowTip{ boxCx + half + Scale(2.2f, scale), boxCy - half - Scale(1.2f, scale) };
+        target->DrawLine(D2D1::Point2F(boxCx + Scale(1.0f, scale), boxCy - Scale(1.0f, scale)), arrowTip, brush, stroke);
+        const float headSize = Scale(2.6f, scale);
+        target->DrawLine(arrowTip, D2D1::Point2F(arrowTip.x - headSize, arrowTip.y), brush, stroke);
+        target->DrawLine(arrowTip, D2D1::Point2F(arrowTip.x, arrowTip.y + headSize), brush, stroke);
+        const float chevCx = cx + Scale(7.0f, scale);
+        const float chevHalf = Scale(2.4f, scale);
+        target->DrawLine(D2D1::Point2F(chevCx - chevHalf, cy - Scale(1.5f, scale)), D2D1::Point2F(chevCx, cy + Scale(1.5f, scale)), brush, stroke);
+        target->DrawLine(D2D1::Point2F(chevCx, cy + Scale(1.5f, scale)), D2D1::Point2F(chevCx + chevHalf, cy - Scale(1.5f, scale)), brush, stroke);
+        break;
+    }
+    }
+}
+
 XMVECTOR LoadOrientation(const Camera& camera)
 {
     return XMQuaternionNormalize(XMLoadFloat4(&camera.orientation));
@@ -939,23 +1138,29 @@ struct Renderer::Impl
     // Photos-style bottom bar: a bar strip matching the title bar's fill,
     // with a D2D-drawn zoom slider (ZoomTrackRect, Preview3D.cpp — same
     // split as the Speed flyout track) docked bottom-right next to the
-    // zoom-percent readout. Only drawn while a model is loaded — see
-    // OverlayInfo::bottomBarHeight, which the app zeroes out otherwise.
+    // zoom-percent readout, the Info button just left of it, and the
+    // Fullscreen toggle at the very right. Only drawn while a model is
+    // loaded — see OverlayInfo::bottomBarHeight, which the app zeroes out
+    // otherwise. All three button rects are computed by Preview3D.cpp (same
+    // split as the zoom track) so hit-testing and drawing never drift apart.
     void DrawBottomBar(const OverlayInfo& overlay, float clientWidth, float clientHeight, float scale)
     {
         if (overlay.bottomBarHeight <= 0) return;
         const float barTop = clientHeight - static_cast<float>(overlay.bottomBarHeight);
-        const float contentRight = clientWidth - static_cast<float>(overlay.infoPanelWidth);
         SetBrush(D2D1::ColorF(0x2C2C2E));
         overlayTarget->FillRectangle(D2D1::RectF(0, barTop, clientWidth, clientHeight), brush.Get());
         SetBrush(D2D1::ColorF(0x3A3A3C));
         overlayTarget->FillRectangle(D2D1::RectF(0, barTop, clientWidth, barTop + 1.0f), brush.Get());
 
+        DrawIconButton(overlay.infoButtonRect, IconKind::Info, /*visible*/ true, /*enabled*/ true,
+            overlay.infoPanelVisible, overlay.infoButtonHover, overlay.infoButtonPressed, scale);
+
         const std::wstring percentText = std::to_wstring(static_cast<int>(std::lround(overlay.zoomPercent))) + L"%";
         const float labelWidth = Scale(56, scale);
-        const float margin = Scale(14, scale);
+        const float gap = Scale(10, scale);
+        const D2D1_RECT_F fullscreenRect = ToRectF(overlay.fullscreenButtonRect);
         DrawText(percentText, smallFormat.Get(),
-            D2D1::RectF(contentRight - margin - labelWidth, barTop, contentRight - margin, clientHeight),
+            D2D1::RectF(fullscreenRect.left - gap - labelWidth, barTop, fullscreenRect.left - gap, clientHeight),
             D2D1::ColorF(0xA1A1A6), DWRITE_TEXT_ALIGNMENT_TRAILING);
 
         const D2D1_RECT_F track = ToRectF(overlay.zoomTrackRect);
@@ -967,6 +1172,29 @@ struct Renderer::Impl
         overlayTarget->DrawLine(D2D1::Point2F(track.left, trackY), D2D1::Point2F(thumbX, trackY), brush.Get(), Scale(3, scale));
         SetBrush(D2D1::ColorF(0xF5F5F7));
         overlayTarget->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumbX, trackY), Scale(7, scale), Scale(7, scale)), brush.Get());
+
+        DrawIconButton(overlay.fullscreenButtonRect, overlay.isFullscreen ? IconKind::FullscreenExit : IconKind::FullscreenEnter,
+            /*visible*/ true, /*enabled*/ true, overlay.isFullscreen, overlay.fullscreenButtonHover, overlay.fullscreenButtonPressed, scale);
+    }
+
+    // Shared icon-button chrome (fill/hover/press/active/disabled) for both
+    // the title-bar action buttons and the bottom-bar Info/Fullscreen
+    // buttons, painting one of the vector glyphs from IconKind on top.
+    void DrawIconButton(const RECT& rectI, IconKind icon, bool visible, bool enabled, bool active,
+        bool hovered, bool pressedNow, float scale)
+    {
+        if (!visible) return;
+        const D2D1_RECT_F rect = ToRectF(rectI);
+        D2D1_COLOR_F fill = D2D1::ColorF(0x3A3A3C);
+        D2D1_COLOR_F iconColor = D2D1::ColorF(0xF5F5F7);
+        if (active) fill = D2D1::ColorF(0x0A84FF, 0.28f);
+        if (hovered) fill = active ? D2D1::ColorF(0x0A84FF, 0.40f) : D2D1::ColorF(0x46464A);
+        if (pressedNow) fill = active ? D2D1::ColorF(0x0A84FF, 0.55f) : D2D1::ColorF(0x2C2C2E);
+        if (!enabled) { fill = D2D1::ColorF(0x2C2C2E); iconColor = D2D1::ColorF(0x707075); }
+        SetBrush(fill);
+        overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(6, scale), Scale(6, scale)), brush.Get());
+        SetBrush(iconColor);
+        DrawIcon(overlayTarget.Get(), brush.Get(), icon, rect, scale);
     }
 
     // Right-docked, read-only "Stats & Shading" panel — see InfoPanel.h for
@@ -1020,9 +1248,9 @@ struct Renderer::Impl
             static_cast<float>(rect.right), static_cast<float>(rect.bottom));
     }
 
-    // Windows-11-Photos-style unified title bar: system icon, centered
-    // filename, action buttons, Open With, and the (D2D-drawn, NC-hit-tested)
-    // system min/max/close — all laid out by Chrome::UpdateLayout.
+    // Windows-11-Photos-style unified title bar: action buttons, centered
+    // filename, Open With, and the (D2D-drawn, NC-hit-tested) system
+    // min/max/close — all laid out by Chrome::UpdateLayout.
     void DrawTitleBar(const OverlayInfo& overlay, const Chrome& chrome, float clientWidth, float scale)
     {
         const RECT barRectI = chrome.TitleBarRect();
@@ -1032,43 +1260,28 @@ struct Renderer::Impl
         SetBrush(D2D1::ColorF(0x3A3A3C));
         overlayTarget->FillRectangle(D2D1::RectF(0, barHeight - 1, clientWidth, barHeight), brush.Get());
 
-        const D2D1_RECT_F iconRect = ToRectF(chrome.Button(Chrome::Part::SystemIcon).rect);
-        SetBrush(D2D1::ColorF(0x3A3A3C));
-        overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(iconRect, Scale(6, scale), Scale(6, scale)), brush.Get());
-        DrawText(L"3D", smallFormat.Get(), iconRect, D2D1::ColorF(0xFFFFFF), DWRITE_TEXT_ALIGNMENT_CENTER);
-
         const std::wstring filename = overlay.filename.empty() ? L"3D Preview" : overlay.filename;
         DrawText(filename, filenameFormat.Get(), ToRectF(chrome.FilenameRect()), D2D1::ColorF(0xF5F5F7),
             DWRITE_TEXT_ALIGNMENT_CENTER);
 
-        // Text-labeled action buttons, matching the old owner-drawn toolbar
-        // button palette (primary/secondary/active/hover/pressed).
-        auto drawActionButton = [&](Chrome::Part part, const wchar_t* label, bool active)
+        // Icon-only action buttons (vector glyphs, IconKind/DrawIcon above),
+        // matching the old owner-drawn toolbar button palette
+        // (primary/secondary/active/hover/pressed).
+        auto drawActionButton = [&](Chrome::Part part, IconKind icon, bool active)
         {
             const Chrome::ButtonState& state = chrome.Button(part);
-            if (!state.visible) return;
-            const D2D1_RECT_F rect = ToRectF(state.rect);
             const bool hovered = chrome.hover == part;
             const bool pressedNow = chrome.pressed == part;
-            D2D1_COLOR_F fill = D2D1::ColorF(0x3A3A3C);
-            D2D1_COLOR_F text = D2D1::ColorF(0xF5F5F7);
-            if (active) fill = D2D1::ColorF(0x0A84FF, 0.28f);
-            if (hovered) fill = active ? D2D1::ColorF(0x0A84FF, 0.40f) : D2D1::ColorF(0x46464A);
-            if (pressedNow) fill = active ? D2D1::ColorF(0x0A84FF, 0.55f) : D2D1::ColorF(0x2C2C2E);
-            if (!state.enabled) { fill = D2D1::ColorF(0x2C2C2E); text = D2D1::ColorF(0x707075); }
-            SetBrush(fill);
-            overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(rect, Scale(6, scale), Scale(6, scale)), brush.Get());
-            DrawText(label, smallFormat.Get(), rect, text, DWRITE_TEXT_ALIGNMENT_CENTER);
+            DrawIconButton(state.rect, icon, state.visible, state.enabled, active, hovered, pressedNow, scale);
         };
-        drawActionButton(Chrome::Part::Grid, L"Grid", overlay.gridVisible);
-        drawActionButton(Chrome::Part::AxisSnap, L"Snap", overlay.axisSnapEnabled);
-        drawActionButton(Chrome::Part::Speed, L"Speed", false);
-        drawActionButton(Chrome::Part::Fit, L"Fit", false);
-        drawActionButton(Chrome::Part::Reset, L"Reset", false);
-        drawActionButton(Chrome::Part::Info, L"Info", overlay.infoPanelVisible);
-        drawActionButton(Chrome::Part::Share, L"Share", false);
-        drawActionButton(Chrome::Part::Overflow, L"•••", false);
-        drawActionButton(Chrome::Part::OpenWith, L"Open With ▾", false);
+        drawActionButton(Chrome::Part::Grid, IconKind::Grid, overlay.gridVisible);
+        drawActionButton(Chrome::Part::AxisSnap, IconKind::AxisSnap, overlay.axisSnapEnabled);
+        drawActionButton(Chrome::Part::Speed, IconKind::Speed, false);
+        drawActionButton(Chrome::Part::Fit, IconKind::Fit, false);
+        drawActionButton(Chrome::Part::Reset, IconKind::Reset, false);
+        drawActionButton(Chrome::Part::Share, IconKind::Share, false);
+        drawActionButton(Chrome::Part::Overflow, IconKind::Overflow, false);
+        drawActionButton(Chrome::Part::OpenWith, IconKind::OpenWith, false);
 
         // System caption buttons: simple vector glyphs, matching Windows 11's
         // minimize/maximize-or-restore/close. DWM (via DwmDefWindowProc,
@@ -1144,10 +1357,53 @@ struct Renderer::Impl
         overlayTarget->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumbX, trackY), Scale(7, scale), Scale(7, scale)), brush.Get());
     }
 
+    // A small dark bubble naming the button under the cursor, shown once
+    // Preview3D.cpp's hover-delay timer decides the pointer has parked on a
+    // button for a while (see ComputeTooltipInfo). Anchored below title-bar
+    // buttons and above bottom-bar ones (overlay.tooltipBelow) so it never
+    // reads as covering the button it describes.
+    void DrawTooltip(const OverlayInfo& overlay, float clientWidth, float scale)
+    {
+        if (!overlay.tooltipVisible || overlay.tooltipText.empty() || !smallFormat) return;
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(writeFactory->CreateTextLayout(overlay.tooltipText.c_str(), static_cast<UINT32>(overlay.tooltipText.size()),
+            smallFormat.Get(), Scale(300, scale), Scale(200, scale), &layout))) return;
+        // smallFormat is shared and mutated in place by every other DrawText()
+        // call this frame (e.g. DrawBottomBar's TRAILING-aligned percent
+        // readout, drawn just before this) — pin this layout's own alignment
+        // so it never inherits whatever that last call left behind (with a
+        // wide layout box, TRAILING alignment pushed the text off past the
+        // right edge of the bubble, making it silently invisible).
+        layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(layout->GetMetrics(&metrics))) return;
+
+        const float paddingX = Scale(10, scale);
+        const float paddingY = Scale(6, scale);
+        const float gap = Scale(8, scale);
+        const float margin = Scale(4, scale);
+        const float bubbleWidth = metrics.width + paddingX * 2.0f;
+        const float bubbleHeight = metrics.height + paddingY * 2.0f;
+
+        const D2D1_RECT_F anchor = ToRectF(overlay.tooltipAnchorRect);
+        const float anchorCenterX = (anchor.left + anchor.right) * 0.5f;
+        const float left = std::clamp(anchorCenterX - bubbleWidth * 0.5f, margin, std::max(margin, clientWidth - bubbleWidth - margin));
+        const float top = overlay.tooltipBelow ? anchor.bottom + gap : anchor.top - gap - bubbleHeight;
+        const D2D1_RECT_F bubble = D2D1::RectF(left, top, left + bubbleWidth, top + bubbleHeight);
+
+        SetBrush(D2D1::ColorF(0x1C1C1E, 0.97f));
+        overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(bubble, Scale(5, scale), Scale(5, scale)), brush.Get());
+        SetBrush(D2D1::ColorF(0x48484C));
+        overlayTarget->DrawRoundedRectangle(D2D1::RoundedRect(bubble, Scale(5, scale), Scale(5, scale)), brush.Get(), 1.0f);
+        SetBrush(D2D1::ColorF(0xF5F5F7));
+        overlayTarget->DrawTextLayout(D2D1::Point2F(left + paddingX, top + paddingY), layout.Get(), brush.Get());
+    }
+
     void DrawOverlay(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo, const Chrome& chrome)
     {
         if (!overlayTarget || !brush) return;
-        if (overlay.state != ViewerState::Loading && !CreateTextFormats(overlay.dpiScale)) return;
+        if (!CreateTextFormats(overlay.dpiScale)) return;
         const float scale = overlay.dpiScale;
         const float toolbar = static_cast<float>(overlay.toolbarHeight);
         const float clientWidth = static_cast<float>(width);
@@ -1160,6 +1416,16 @@ struct Renderer::Impl
         const float contentRight = clientWidth - static_cast<float>(overlay.infoPanelWidth);
 
         overlayTarget->BeginDraw();
+        // Drawn first (so the system caption buttons never disappear while a
+        // model is loading — this used to be skipped entirely during
+        // ViewerState::Loading, which is what made the window briefly
+        // uncontrollable right after launching with a file or dropping one
+        // in) but not at all in Fullscreen: Preview3D.cpp's
+        // EffectiveToolbarHeight already collapses the reserved space to 0
+        // there and bypasses the title bar's hit-testing to match, so the
+        // viewport can fill the whole window with no dead strip of
+        // now-unreachable chrome at the top.
+        if (!overlay.isFullscreen) DrawTitleBar(overlay, chrome, clientWidth, scale);
         if (overlay.state == ViewerState::Loading)
         {
             const float centerX = clientWidth * 0.5f;
@@ -1186,8 +1452,6 @@ struct Renderer::Impl
             }
             return;
         }
-
-        DrawTitleBar(overlay, chrome, clientWidth, scale);
 
         const D2D1_COLOR_F primaryText = D2D1::ColorF(0xF5F5F7);
         const D2D1_COLOR_F secondaryText = D2D1::ColorF(0xA1A1A6);
@@ -1297,6 +1561,7 @@ struct Renderer::Impl
             DrawGizmo(camera, gizmo, scale);
         }
         DrawSpeedFlyout(overlay, scale);
+        DrawTooltip(overlay, clientWidth, scale);
 
         if (overlayTarget->EndDraw() == D2DERR_RECREATE_TARGET)
         {

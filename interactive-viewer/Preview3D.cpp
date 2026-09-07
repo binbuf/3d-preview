@@ -34,6 +34,12 @@ constexpr float kClickDragThresholdPixels = 6.0f;
 // re-check animation state and render, so any burst or self-sustaining
 // message flood can never fully starve rendering.
 constexpr int kMaxDrainedMessagesPerIteration = 32;
+// How long the pointer has to sit still over a toolbar button before its
+// tooltip appears (see ComputeTooltipInfo/UpdateTooltipTracking) — longer
+// than a system tooltip's default so it stays out of the way during normal
+// clicking, but still short enough to answer "what does this button do?".
+constexpr UINT_PTR kTooltipTimerId = 1;
+constexpr UINT kTooltipDelayMs = 1500;
 
 // Exclusive pointer state machine. Exactly one mode owns camera/selection
 // input at a time; the mode is chosen at button-down and stays locked for the
@@ -85,6 +91,21 @@ struct ViewerApp
     bool speedFlyoutOpen = false;
     bool speedSliderDragging = false;
     bool zoomSliderDragging = false;
+    bool infoButtonHover = false;
+    bool infoButtonPressed = false;
+    bool fullscreenButtonHover = false;
+    bool fullscreenButtonPressed = false;
+    bool isFullscreen = false;
+    // Hover-delay tooltip (see ComputeTooltipInfo/UpdateTooltipTracking):
+    // tooltipTargetId identifies the hovered button (0 == none) so tracking
+    // can tell "still the same button" from "moved to a new one" without
+    // re-deriving text/rect every mouse move.
+    int tooltipTargetId = 0;
+    bool tooltipVisible = false;
+    RECT tooltipAnchorRect{};
+    std::wstring tooltipText;
+    bool tooltipAnchorBelow = true;
+    WINDOWPLACEMENT savedWindowPlacement{ sizeof(WINDOWPLACEMENT) };
     bool rendererReady = false;
     bool closing = false;
     Renderer renderer;
@@ -174,10 +195,23 @@ bool HasNavigableModel(const ViewerApp& app)
 }
 
 // Effective bottom-bar inset for layout purposes: reserved only while a
-// model is loaded, matching HasNavigableModel.
+// model is loaded, matching HasNavigableModel, and collapsed to 0 in
+// Fullscreen so the viewport reclaims that space (see EffectiveToolbarHeight).
 int EffectiveBottomBarHeight(const ViewerApp& app)
 {
-    return HasNavigableModel(app) ? app.bottomBarHeight : 0;
+    return (HasNavigableModel(app) && !app.isFullscreen) ? app.bottomBarHeight : 0;
+}
+
+// Effective title-bar inset for layout/input purposes: the real toolbarHeight
+// normally, but 0 in Fullscreen — Renderer::DrawOverlay skips DrawTitleBar
+// entirely in that state (see OverlayInfo::isFullscreen), and the viewport,
+// gizmo, and hit-testing all need to agree that the whole client area is now
+// live so Fullscreen actually reclaims the space the title bar and its
+// caption buttons used to occupy, rather than just resizing the window over
+// the taskbar while leaving a dead strip of chrome at the top.
+int EffectiveToolbarHeight(const ViewerApp& app)
+{
+    return app.isFullscreen ? 0 : app.toolbarHeight;
 }
 
 // Fixed logical width of the Information panel, docked to the right edge
@@ -199,16 +233,17 @@ float ViewportAspect(const ViewerApp& app)
     RECT client{};
     GetClientRect(app.window, &client);
     return static_cast<float>(std::max(1L, client.right - InfoPanelWidthPixels(app))) /
-        static_cast<float>(std::max(1L, client.bottom - app.toolbarHeight - EffectiveBottomBarHeight(app)));
+        static_cast<float>(std::max(1L, client.bottom - EffectiveToolbarHeight(app) - EffectiveBottomBarHeight(app)));
 }
 
 // The 3D viewport is the client area below the title bar, above the bottom
-// bar, and left of the Information panel (when open).
+// bar, and left of the Information panel (when open) — full-window in
+// Fullscreen, since both bars collapse to 0 there.
 RECT ViewportRect(const ViewerApp& app)
 {
     RECT viewport{};
     GetClientRect(app.window, &viewport);
-    viewport.top = app.toolbarHeight;
+    viewport.top = EffectiveToolbarHeight(app);
     viewport.bottom -= EffectiveBottomBarHeight(app);
     viewport.right -= InfoPanelWidthPixels(app);
     return viewport;
@@ -362,7 +397,7 @@ void UpdateGizmoLayout(ViewerApp& app)
     RECT client{};
     GetClientRect(app.window, &client);
     app.gizmo.UpdateLayout(client.right - InfoPanelWidthPixels(app), client.bottom,
-        app.toolbarHeight, EffectiveBottomBarHeight(app), app.dpiScale);
+        EffectiveToolbarHeight(app), EffectiveBottomBarHeight(app), app.dpiScale);
 }
 
 void UpdateChromeLayout(ViewerApp& app)
@@ -625,26 +660,129 @@ float ZoomPercentFor(const Camera& camera)
     return static_cast<float>(100.0 * camera.homeDistance / std::max(1e-6, camera.distance));
 }
 
-// Compact zoom slider, docked in the bottom-right of the bottom bar just
-// left of the D2D-drawn percent readout (DrawBottomBar's margin/labelWidth,
-// Renderer.cpp — mirrored here so the two rects never drift apart). Shared
-// by drawing (RenderScene) and input handling (WM_LBUTTONDOWN/MOUSEMOVE),
-// the same split as the Speed flyout track above.
-RECT ZoomTrackRect(const ViewerApp& app)
+// Logical width of the small icon buttons docked in the bottom bar (Info,
+// Fullscreen) — see InfoButtonRect/FullscreenButtonRect below.
+constexpr int kBottomBarButtonWidth = 34;
+constexpr int kBottomBarButtonHeight = 28;
+
+// Bottom-bar button rect centered vertically in the bar, right edge at
+// `right` — shared layout math for Info and Fullscreen (below).
+RECT BottomBarButtonRect(const ViewerApp& app, int right)
+{
+    RECT client{};
+    GetClientRect(app.window, &client);
+    const int width = Scale(app, kBottomBarButtonWidth);
+    const int height = Scale(app, kBottomBarButtonHeight);
+    const int barY = client.bottom - app.bottomBarHeight;
+    const int centerY = barY + app.bottomBarHeight / 2;
+    return RECT{ right - width, centerY - height / 2, right, centerY + height / 2 };
+}
+
+// Fullscreen toggle: the very right of the bottom bar, after the zoom
+// slider and its percent-text readout.
+RECT FullscreenButtonRect(const ViewerApp& app)
 {
     RECT client{};
     GetClientRect(app.window, &client);
     const int contentRight = client.right - InfoPanelWidthPixels(app);
     const int margin = Scale(app, 14);
+    return BottomBarButtonRect(app, contentRight - margin);
+}
+
+// Compact zoom slider, docked in the bottom-right of the bottom bar just
+// left of the D2D-drawn percent readout (DrawBottomBar's labelWidth,
+// Renderer.cpp — mirrored here so the two rects never drift apart), which
+// in turn sits left of the Fullscreen button. Shared by drawing
+// (RenderScene) and input handling (WM_LBUTTONDOWN/MOUSEMOVE), the same
+// split as the Speed flyout track above.
+RECT ZoomTrackRect(const ViewerApp& app)
+{
+    const RECT fullscreenButton = FullscreenButtonRect(app);
     const int percentLabelWidth = Scale(app, 56);
     const int trackWidth = Scale(app, 110);
     const int gap = Scale(app, 14);
-    const int right = contentRight - margin - percentLabelWidth - gap;
+    const int right = fullscreenButton.left - gap - percentLabelWidth - gap;
     const int left = right - trackWidth;
+    RECT client{};
+    GetClientRect(app.window, &client);
     const int barY = client.bottom - app.bottomBarHeight;
     const int centerY = barY + app.bottomBarHeight / 2;
     const int halfHeight = Scale(app, 8);
     return RECT{ left, centerY - halfHeight, right, centerY + halfHeight };
+}
+
+// Info panel toggle: just left of the zoom slider, on the bottom bar.
+RECT InfoButtonRect(const ViewerApp& app)
+{
+    const RECT track = ZoomTrackRect(app);
+    const int gap = Scale(app, 14);
+    return BottomBarButtonRect(app, track.left - gap);
+}
+
+// What ComputeTooltipInfo resolves the current hover into: an id (0 == none,
+// otherwise unique per button so UpdateTooltipTracking can tell "still this
+// button" from "moved to a new one"), the button's rect (so the bubble can
+// anchor to it even after the mouse moves on), its label, and which side of
+// the button the bubble belongs on.
+struct TooltipInfo
+{
+    int id = 0;
+    RECT rect{};
+    const wchar_t* text = L"";
+    bool below = true;   // true: title-bar buttons; false: bottom-bar buttons
+};
+
+TooltipInfo ComputeTooltipInfo(const ViewerApp& app)
+{
+    // Suppressed mid-interaction (dragging a slider, a button already
+    // pressed, the Speed flyout open) rather than just delayed, so a tooltip
+    // never appears over something the user is actively using.
+    if (app.chrome.pressed != Chrome::Part::None || app.infoButtonPressed || app.fullscreenButtonPressed ||
+        app.speedSliderDragging || app.zoomSliderDragging || app.speedFlyoutOpen)
+    {
+        return {};
+    }
+    struct Entry { Chrome::Part part; const wchar_t* text; };
+    static constexpr Entry kEntries[] = {
+        { Chrome::Part::Grid, L"Toggle ground grid" },
+        { Chrome::Part::AxisSnap, L"Snap truck to axis" },
+        { Chrome::Part::Speed, L"Flight speed" },
+        { Chrome::Part::Fit, L"Frame model in view" },
+        { Chrome::Part::Reset, L"Reset view" },
+        { Chrome::Part::Share, L"Share" },
+        { Chrome::Part::Overflow, L"More options" },
+        { Chrome::Part::OpenWith, L"Open with" },
+    };
+    for (const Entry& entry : kEntries)
+    {
+        if (app.chrome.hover == entry.part)
+        {
+            return { static_cast<int>(entry.part) + 1, app.chrome.Button(entry.part).rect, entry.text, true };
+        }
+    }
+    if (app.infoButtonHover) return { 100, InfoButtonRect(app), L"Model information", false };
+    if (app.fullscreenButtonHover) return { 101, FullscreenButtonRect(app), L"Fullscreen", false };
+    return {};
+}
+
+// Re-evaluates the hovered button and (re)starts/cancels the hover-delay
+// timer whenever it changes. Called from every place chrome.hover,
+// chrome.pressed, infoButtonHover/Pressed, or fullscreenButtonHover/Pressed
+// can change, so the tooltip always tracks the true current hover target
+// without needing its own dedicated mouse-tracking.
+void UpdateTooltipTracking(ViewerApp& app)
+{
+    const TooltipInfo info = ComputeTooltipInfo(app);
+    if (info.id == app.tooltipTargetId) return;
+    const bool wasVisible = app.tooltipVisible;
+    app.tooltipTargetId = info.id;
+    app.tooltipAnchorRect = info.rect;
+    app.tooltipText = info.text;
+    app.tooltipAnchorBelow = info.below;
+    app.tooltipVisible = false;
+    KillTimer(app.window, kTooltipTimerId);
+    if (info.id != 0) SetTimer(app.window, kTooltipTimerId, kTooltipDelayMs, nullptr);
+    if (wasVisible) InvalidateRect(app.window, nullptr, FALSE);
 }
 
 // Direct manipulation: sets distance immediately (no easing), so the view
@@ -751,6 +889,51 @@ void ToggleInfoPanel(ViewerApp& app)
     LayoutControls(app);
     UpdateGizmoLayout(app);
     InvalidateRect(app.window, nullptr, FALSE);
+}
+
+// Immersive-fullscreen toggle: expands the window to exactly cover its
+// current monitor (hiding the OS resize border/drop-shadow/rounded corners,
+// same recipe as most "fake fullscreen" apps), raises it above the taskbar
+// (HWND_TOPMOST — matching monitor bounds alone doesn't make Explorer hide a
+// plain top-level window behind it), and hides our own D2D title bar and
+// bottom bar (EffectiveToolbarHeight/EffectiveBottomBarHeight, Preview3D.cpp;
+// DrawOverlay, Renderer.cpp) so the viewport fills the whole screen — Maximize
+// instead snaps to the work area, keeps the taskbar and our chrome visible,
+// and never goes topmost, so the two stay distinct. Independent of whether a
+// model is loaded, same as the caption buttons (while windowed).
+void ToggleFullscreen(ViewerApp& app)
+{
+    if (!ConsumeToggleCommand(app, ID_VIEW_FULLSCREEN)) return;
+    if (!app.isFullscreen)
+    {
+        app.savedWindowPlacement.length = sizeof(WINDOWPLACEMENT);
+        GetWindowPlacement(app.window, &app.savedWindowPlacement);
+        MONITORINFO monitorInfo{ sizeof(MONITORINFO) };
+        if (!GetMonitorInfoW(MonitorFromWindow(app.window, MONITOR_DEFAULTTOPRIMARY), &monitorInfo)) return;
+        const int noRound = 1;   // DWMWCP_DONOTROUND: avoid corner clipping artifacts at exact monitor bounds
+        DwmSetWindowAttribute(app.window, 33, &noRound, sizeof(noRound));
+        app.isFullscreen = true;
+        SetWindowPos(app.window, HWND_TOPMOST, monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top,
+            monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left,
+            monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top,
+            SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
+    else
+    {
+        app.isFullscreen = false;
+        const int cornerPreference = 2;   // DWMWCP_ROUNDSMALL, matches WM_CREATE
+        DwmSetWindowAttribute(app.window, 33, &cornerPreference, sizeof(cornerPreference));
+        SetWindowPlacement(app.window, &app.savedWindowPlacement);
+        // HWND_NOTOPMOST undoes the HWND_TOPMOST above — otherwise the window
+        // would stay pinned above every other app (taskbar included) even
+        // after returning to windowed/maximized.
+        SetWindowPos(app.window, HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
+    LayoutControls(app);
+    UpdateGizmoLayout(app);
+    UpdateChromeLayout(app);
+    InvalidateRect(app.window, nullptr, TRUE);
 }
 
 void RecreateButtonFont(ViewerApp& app)
@@ -991,6 +1174,7 @@ void ShowControls(HWND owner)
         L"Ground grid\tG\n"
         L"Reset view\tHome or R\n"
         L"Open\tCtrl+O\n"
+        L"Fullscreen\tF11\n"
         L"Cancel open\tEsc\n\n"
         L"Left-drag orbit and middle-drag truck wrap the cursor at the\n"
         L"viewport edge, and drags glide to a stop with exponential inertia.",
@@ -1075,6 +1259,7 @@ void HandleCommand(ViewerApp& app, int id)
     case ID_VIEW_GRID: ToggleGrid(app); break;
     case ID_VIEW_AXIS_SNAP: ToggleAxisSnap(app); break;
     case ID_VIEW_INFO: ToggleInfoPanel(app); break;
+    case ID_VIEW_FULLSCREEN: ToggleFullscreen(app); break;
     case ID_VIEW_FRONT: SnapViewCommand(app, ViewDir::Front); break;
     case ID_VIEW_RIGHT: SnapViewCommand(app, ViewDir::Right); break;
     case ID_VIEW_TOP: SnapViewCommand(app, ViewDir::Top); break;
@@ -1140,28 +1325,16 @@ void ToggleSpeedFlyout(ViewerApp& app)
 // Dispatches a click on one of the D2D-drawn title-bar buttons (Chrome +
 // Renderer::DrawTitleBar). Reuses HandleCommand for the actions that already
 // have a command ID (kept working via Ctrl+O/accelerators too); the rest
-// (system menu, Speed flyout, Share, Open With) are new to the title bar.
+// (Speed flyout, Share, Open With) are new to the title bar.
 void HandleChromeAction(ViewerApp& app, Chrome::Part part)
 {
     switch (part)
     {
-    case Chrome::Part::SystemIcon:
-    {
-        HMENU systemMenu = GetSystemMenu(app.window, FALSE);
-        RECT iconRect = app.chrome.Button(Chrome::Part::SystemIcon).rect;
-        POINT anchor{ iconRect.left, iconRect.bottom };
-        ClientToScreen(app.window, &anchor);
-        const int command = TrackPopupMenu(systemMenu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
-            anchor.x, anchor.y, 0, app.window, nullptr);
-        if (command) PostMessageW(app.window, WM_SYSCOMMAND, static_cast<WPARAM>(command), 0);
-        break;
-    }
     case Chrome::Part::Grid: HandleCommand(app, ID_VIEW_GRID); break;
     case Chrome::Part::AxisSnap: HandleCommand(app, ID_VIEW_AXIS_SNAP); break;
     case Chrome::Part::Speed: ToggleSpeedFlyout(app); break;
     case Chrome::Part::Fit: HandleCommand(app, ID_VIEW_FIT); break;
     case Chrome::Part::Reset: HandleCommand(app, ID_VIEW_RESET); break;
-    case Chrome::Part::Info: HandleCommand(app, ID_VIEW_INFO); break;
     case Chrome::Part::Share: DoShare(app); break;
     case Chrome::Part::Overflow: HandleCommand(app, ID_VIEW_MENU); break;
     case Chrome::Part::OpenWith: ShowOpenWithMenu(app); break;
@@ -1196,7 +1369,7 @@ FlightInput BuildFlightInput(const ViewerApp& app)
     }
     RECT client{};
     GetClientRect(app.window, &client);
-    input.viewportHeight = static_cast<float>(std::max(1L, client.bottom - app.toolbarHeight - EffectiveBottomBarHeight(app)));
+    input.viewportHeight = static_cast<float>(std::max(1L, client.bottom - EffectiveToolbarHeight(app) - EffectiveBottomBarHeight(app)));
     return input;
 }
 
@@ -1217,7 +1390,7 @@ void RenderScene(ViewerApp& app)
     overlay.warning = app.warning;
     overlay.animationPhase = static_cast<float>(GetTickCount64() % 1400) / 1400.0f;
     overlay.dpiScale = app.dpiScale;
-    overlay.toolbarHeight = app.toolbarHeight;
+    overlay.toolbarHeight = EffectiveToolbarHeight(app);
     overlay.bottomBarHeight = EffectiveBottomBarHeight(app);
     overlay.infoPanelWidth = InfoPanelWidthPixels(app);
     if (overlay.infoPanelWidth > 0 && app.loadedModel)
@@ -1231,7 +1404,14 @@ void RenderScene(ViewerApp& app)
     {
         overlay.zoomTrackRect = ZoomTrackRect(app);
         overlay.zoomSliderT = static_cast<float>(ZoomSliderPositionFor(app.camera)) / kZoomSliderMax;
+        overlay.infoButtonRect = InfoButtonRect(app);
+        overlay.infoButtonHover = app.infoButtonHover;
+        overlay.infoButtonPressed = app.infoButtonPressed;
+        overlay.fullscreenButtonRect = FullscreenButtonRect(app);
+        overlay.fullscreenButtonHover = app.fullscreenButtonHover;
+        overlay.fullscreenButtonPressed = app.fullscreenButtonPressed;
     }
+    overlay.isFullscreen = app.isFullscreen;
     overlay.hasModel = app.renderer.HasModel();
     overlay.gridVisible = app.gridVisible;
     overlay.axisSnapEnabled = app.axisSnapEnabled;
@@ -1250,6 +1430,10 @@ void RenderScene(ViewerApp& app)
     overlay.speedHudAlpha = static_cast<float>(HudAlpha(app.speedHudUntil, now));
     overlay.modeHud = app.modeHudText;
     overlay.modeHudAlpha = static_cast<float>(HudAlpha(app.modeHudUntil, now));
+    overlay.tooltipVisible = app.tooltipVisible;
+    overlay.tooltipAnchorRect = app.tooltipAnchorRect;
+    overlay.tooltipText = app.tooltipText;
+    overlay.tooltipBelow = app.tooltipAnchorBelow;
     UpdateChromeLayout(app);
     app.renderer.Render(app.camera, overlay, app.gizmo, app.chrome);
 }
@@ -1380,7 +1564,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
 
         POINT clientPoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(window, &clientPoint);
-        if (clientPoint.y >= app->toolbarHeight) return HTCLIENT;
+        if (clientPoint.y >= EffectiveToolbarHeight(*app)) return HTCLIENT;
         switch (app->chrome.HitTest(clientPoint))
         {
         case Chrome::Part::Minimize: return HTMINBUTTON;
@@ -1568,7 +1752,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                     const double span = std::sqrt(spanX * spanX + spanY * spanY);
                     RECT client{}; GetClientRect(window, &client);
                     app->camera.Pan(static_cast<float>(center.x - app->touchCenter.x), static_cast<float>(center.y - app->touchCenter.y),
-                        static_cast<float>(client.bottom - app->toolbarHeight));
+                        static_cast<float>(client.bottom - EffectiveToolbarHeight(*app)));
                     if (app->touchSpan > 1.0 && span > 1.0)
                     {
                         app->camera.Dolly(static_cast<float>(std::log(span / app->touchSpan) / 0.16));
@@ -1607,6 +1791,11 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 SetCursor(LoadCursorW(nullptr, IDC_HAND));
                 return TRUE;
             }
+            if (app->infoButtonHover || app->fullscreenButtonHover)
+            {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
         }
         break;
     case WM_MOUSELEAVE:
@@ -1622,6 +1811,13 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             app->chrome.hover = Chrome::Part::None;
             InvalidateRect(window, nullptr, FALSE);
         }
+        if (app->infoButtonHover || app->fullscreenButtonHover)
+        {
+            app->infoButtonHover = false;
+            app->fullscreenButtonHover = false;
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        UpdateTooltipTracking(*app);
         return 0;
     case WM_LBUTTONDOWN:
     {
@@ -1638,6 +1834,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 app->speedSliderDragging = true;
                 SetFlySpeedFromFlyoutX(*app, downPoint.x);
                 InvalidateRect(window, nullptr, FALSE);
+                UpdateTooltipTracking(*app);
                 return 0;
             }
             app->speedFlyoutOpen = false;
@@ -1647,7 +1844,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             // so clicking a different title-bar button both dismisses the
             // flyout and performs that click in one action.
         }
-        if (downPoint.y < app->toolbarHeight)
+        if (downPoint.y < EffectiveToolbarHeight(*app))
         {
             const Chrome::Part part = app->chrome.HitTest(downPoint);
             if (part != Chrome::Part::None && part != Chrome::Part::Caption)
@@ -1655,6 +1852,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 SetCapture(window);
                 app->chrome.pressed = part;
                 InvalidateRect(window, nullptr, FALSE);
+                UpdateTooltipTracking(*app);
                 return 0;
             }
         }
@@ -1668,6 +1866,25 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 app->zoomSliderDragging = true;
                 SetZoomFromTrackX(*app, downPoint.x);
                 InvalidateRect(window, nullptr, FALSE);
+                UpdateTooltipTracking(*app);
+                return 0;
+            }
+            const RECT infoButton = InfoButtonRect(*app);
+            if (PtInRect(&infoButton, downPoint))
+            {
+                SetCapture(window);
+                app->infoButtonPressed = true;
+                InvalidateRect(window, nullptr, FALSE);
+                UpdateTooltipTracking(*app);
+                return 0;
+            }
+            const RECT fullscreenButton = FullscreenButtonRect(*app);
+            if (PtInRect(&fullscreenButton, downPoint))
+            {
+                SetCapture(window);
+                app->fullscreenButtonPressed = true;
+                InvalidateRect(window, nullptr, FALSE);
+                UpdateTooltipTracking(*app);
                 return 0;
             }
         }
@@ -1761,13 +1978,14 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             return 0;
         }
         if (app->chrome.pressed != Chrome::Part::None) return 0;
+        if (app->infoButtonPressed || app->fullscreenButtonPressed) return 0;
         if (app->pointerMode == PointerMode::None)
         {
             // Idle hover tracking: the title-bar action buttons above the
             // viewport, the gizmo within it. (Min/Max/Close hover is tracked
             // separately via WM_NCMOUSEMOVE, since those points are always
             // non-client.)
-            if (movePoint.y < app->toolbarHeight)
+            if (movePoint.y < EffectiveToolbarHeight(*app))
             {
                 const Chrome::Part hit = app->chrome.HitTest(movePoint);
                 const Chrome::Part effective = hit == Chrome::Part::Caption ? Chrome::Part::None : hit;
@@ -1786,12 +2004,44 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                     app->gizmo.hover = NavGizmo::Part::None;
                     InvalidateRect(window, nullptr, FALSE);
                 }
+                UpdateTooltipTracking(*app);
                 return 0;
             }
             if (app->chrome.hover != Chrome::Part::None)
             {
                 app->chrome.hover = Chrome::Part::None;
                 InvalidateRect(window, nullptr, FALSE);
+            }
+            // Bottom-bar Info/Fullscreen hover tracking (only while that bar
+            // is actually shown, i.e. a model is loaded).
+            if (CanNavigate(*app))
+            {
+                RECT client{};
+                GetClientRect(window, &client);
+                if (movePoint.y >= client.bottom - app->bottomBarHeight)
+                {
+                    const RECT infoButton = InfoButtonRect(*app);
+                    const RECT fullscreenButton = FullscreenButtonRect(*app);
+                    const bool overInfo = PtInRect(&infoButton, movePoint) != FALSE;
+                    const bool overFullscreen = PtInRect(&fullscreenButton, movePoint) != FALSE;
+                    if (overInfo != app->infoButtonHover || overFullscreen != app->fullscreenButtonHover)
+                    {
+                        app->infoButtonHover = overInfo;
+                        app->fullscreenButtonHover = overFullscreen;
+                        if (overInfo || overFullscreen)
+                        {
+                            TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE, window, 0 };
+                            TrackMouseEvent(&track);
+                        }
+                        InvalidateRect(window, nullptr, FALSE);
+                    }
+                }
+                else if (app->infoButtonHover || app->fullscreenButtonHover)
+                {
+                    app->infoButtonHover = false;
+                    app->fullscreenButtonHover = false;
+                    InvalidateRect(window, nullptr, FALSE);
+                }
             }
             if (CanNavigate(*app) && PointInViewport(*app, movePoint))
             {
@@ -1813,6 +2063,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 app->gizmo.hover = NavGizmo::Part::None;
                 InvalidateRect(window, nullptr, FALSE);
             }
+            UpdateTooltipTracking(*app);
             return 0;
         }
         if (GetCapture() == window)
@@ -1864,12 +2115,14 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         {
             app->speedSliderDragging = false;
             if (GetCapture() == window) ReleaseCapture();
+            UpdateTooltipTracking(*app);
             return 0;
         }
         if (app->zoomSliderDragging)
         {
             app->zoomSliderDragging = false;
             if (GetCapture() == window) ReleaseCapture();
+            UpdateTooltipTracking(*app);
             return 0;
         }
         if (app->chrome.pressed != Chrome::Part::None)
@@ -1879,10 +2132,33 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             app->chrome.pressed = Chrome::Part::None;
             if (GetCapture() == window) ReleaseCapture();
             InvalidateRect(window, nullptr, FALSE);
-            if (upPoint.y < app->toolbarHeight && app->chrome.HitTest(upPoint) == pressedPart)
+            if (upPoint.y < EffectiveToolbarHeight(*app) && app->chrome.HitTest(upPoint) == pressedPart)
             {
                 HandleChromeAction(*app, pressedPart);
             }
+            UpdateTooltipTracking(*app);
+            return 0;
+        }
+        if (app->infoButtonPressed)
+        {
+            const POINT upPoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            app->infoButtonPressed = false;
+            if (GetCapture() == window) ReleaseCapture();
+            InvalidateRect(window, nullptr, FALSE);
+            const RECT infoButton = InfoButtonRect(*app);
+            if (PtInRect(&infoButton, upPoint)) HandleCommand(*app, ID_VIEW_INFO);
+            UpdateTooltipTracking(*app);
+            return 0;
+        }
+        if (app->fullscreenButtonPressed)
+        {
+            const POINT upPoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            app->fullscreenButtonPressed = false;
+            if (GetCapture() == window) ReleaseCapture();
+            InvalidateRect(window, nullptr, FALSE);
+            const RECT fullscreenButton = FullscreenButtonRect(*app);
+            if (PtInRect(&fullscreenButton, upPoint)) HandleCommand(*app, ID_VIEW_FULLSCREEN);
+            UpdateTooltipTracking(*app);
             return 0;
         }
         if (app->pointerMode == PointerMode::Orbit && !app->selectDragged && CanNavigate(*app) &&
@@ -1959,7 +2235,13 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         }
         return DefWindowProcW(window, message, wParam, lParam);
     case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) { CancelOpen(*app); return 0; }
+        if (wParam == VK_F11) { ToggleFullscreen(*app); return 0; }
+        if (wParam == VK_ESCAPE)
+        {
+            if (app->isFullscreen) { ToggleFullscreen(*app); return 0; }
+            CancelOpen(*app);
+            return 0;
+        }
         if (!CanNavigate(*app)) break;
         if (SetNavigationKey(*app, wParam, true)) return 0;
         if (wParam == VK_OEM_PLUS || wParam == VK_ADD) app->camera.Dolly(1.0f);
@@ -2020,6 +2302,18 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         InvalidateRect(window, nullptr, FALSE);
         return 0;
     }
+    case WM_TIMER:
+        if (wParam == kTooltipTimerId)
+        {
+            KillTimer(window, kTooltipTimerId);
+            if (app->tooltipTargetId != 0)
+            {
+                app->tooltipVisible = true;
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            return 0;
+        }
+        break;
     case WM_DESTROY:
         app->closing = true;
         app->alive->store(false, std::memory_order_relaxed);
@@ -2119,7 +2413,17 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
             }
             // Accelerators are translated first: IsDialogMessageW would
             // otherwise consume keydowns before the hotkeys ever see them.
-            if (!TranslateAcceleratorW(gMainWindow, accelerators, &message))
+            // Escape is dispatched straight through instead: the window has
+            // WS_EX_CONTROLPARENT (for the error-state child buttons), which
+            // makes IsDialogMessageW treat it as dialog-like and silently eat
+            // Escape as a "cancel" keystroke before WM_KEYDOWN's own
+            // Escape-exits-Fullscreen/cancel-open handling ever runs.
+            if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE)
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            else if (!TranslateAcceleratorW(gMainWindow, accelerators, &message))
             {
                 if (gMainWindow && IsDialogMessageW(gMainWindow, &message)) continue;
                 TranslateMessage(&message);

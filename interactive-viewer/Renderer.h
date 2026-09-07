@@ -45,6 +45,13 @@ struct OverlayInfo
     float zoomPercent = 100.0f;   // 100 == the default Fit framing distance
     RECT zoomTrackRect{};         // client px, the D2D-drawn zoom slider's track, valid while bottomBarHeight > 0
     float zoomSliderT = 0.0f;     // 0..1 normalized zoom-slider thumb position
+    RECT infoButtonRect{};        // client px, bottom-bar Info button, just left of the zoom slider
+    bool infoButtonHover = false;
+    bool infoButtonPressed = false;
+    RECT fullscreenButtonRect{};  // client px, bottom-bar Fullscreen toggle, right of the percent readout
+    bool fullscreenButtonHover = false;
+    bool fullscreenButtonPressed = false;
+    bool isFullscreen = false;
     bool hasModel = false;
     bool gridVisible = true;
     bool axisSnapEnabled = false;
@@ -59,6 +66,10 @@ struct OverlayInfo
     float speedHudAlpha = 0.0f;
     std::wstring modeHud;           // transient mode readout (grid/projection)
     float modeHudAlpha = 0.0f;
+    bool tooltipVisible = false;    // true once the hover-delay timer has elapsed
+    RECT tooltipAnchorRect{};       // client px, the hovered button this tooltip describes
+    std::wstring tooltipText;
+    bool tooltipBelow = true;       // true: title-bar buttons (bubble drawn below); false: bottom-bar buttons (drawn above)
 };
 
 // Per-frame navigation intents gathered from keyboard state. The camera eases
