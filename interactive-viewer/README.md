@@ -11,6 +11,9 @@ file registration, caching, streaming/LOD infrastructure, and broader format sup
 - asynchronous mapped-file import with cancellation and stale-load replacement
 - drag/drop, system Open dialog, command-line paths, loading and recoverable error states
 - mouse orbit/pan plus right-drag free look and smooth six-degree-of-freedom keyboard flight
+- a continuous, vsync-paced render loop that only runs while the camera is in motion or a load is
+  in flight, so a still viewport costs no CPU or GPU
+- eased wheel zoom and Fit/Reset camera glides, inertial orbit, and distance-aware flight speed
 - DPI-aware dark native UI, keyboard-reachable controls, tooltips, and a neutral studio/grid render
 
 ## Deliberately deferred
@@ -36,3 +39,8 @@ ambiguous partial result.
 | Reset | `R` |
 | Open | `Ctrl+O` |
 | Cancel open | `Esc` |
+
+Camera motion is time-corrected and eased: flight ramps up and settles instead of stepping, wheel
+zoom and Fit/Reset glide to their destination, arrow keys orbit or pan at a continuous smoothed
+rate, and a flicked left drag carries a short inertia. Rendering runs continuously only while
+anything is in motion; a still viewport idles at zero CPU/GPU cost.

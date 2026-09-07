@@ -130,43 +130,102 @@ struct FrameConstants
 };
 }
 
+namespace
+{
+constexpr float kOrbitPixelsToRadians = 0.008f;
+constexpr double kFlightAccelSeconds = 0.13;
+constexpr double kRollAccelSeconds = 0.10;
+constexpr double kRollBaseSpeed = 1.2;
+constexpr double kBoostMultiplier = 5.0;
+constexpr double kInertiaDecaySeconds = 0.5;
+constexpr double kInertiaMinPixelsPerSecond = 12.0;
+constexpr double kInertiaMaxPixelsPerSecond = 420.0;
+constexpr double kZoomEaseSeconds = 0.09;
+constexpr double kPivotAnimSeconds = 0.5;
+constexpr double kOrientationAnimSeconds = 0.55;
+
+double EaseFactor(double deltaSeconds, double tau)
+{
+    return deltaSeconds > 0.0 ? 1.0 - std::exp(-deltaSeconds / tau) : 0.0;
+}
+
+XMFLOAT4 DefaultOrientation()
+{
+    XMFLOAT4 result{};
+    XMStoreFloat4(&result, XMQuaternionRotationRollPitchYaw(-0.30f, 0.58f, 0.0f));
+    return result;
+}
+}
+
 void Camera::SetBounds(const XMFLOAT3& minimum, const XMFLOAT3& maximum, float aspect)
 {
-    targetX = (static_cast<double>(minimum.x) + maximum.x) * 0.5;
-    targetY = (static_cast<double>(minimum.y) + maximum.y) * 0.5;
-    targetZ = (static_cast<double>(minimum.z) + maximum.z) * 0.5;
+    homeX = (static_cast<double>(minimum.x) + maximum.x) * 0.5;
+    homeY = (static_cast<double>(minimum.y) + maximum.y) * 0.5;
+    homeZ = (static_cast<double>(minimum.z) + maximum.z) * 0.5;
     const double extentX = static_cast<double>(maximum.x) - minimum.x;
     const double extentY = static_cast<double>(maximum.y) - minimum.y;
     const double extentZ = static_cast<double>(maximum.z) - minimum.z;
     sceneRadius = std::max(0.0001, std::sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ) * 0.5);
-    Reset(aspect);
+    targetX = homeX;
+    targetY = homeY;
+    targetZ = homeZ;
+    homeOrientation = DefaultOrientation();
+    orientation = homeOrientation;
+    desiredOrientation = homeOrientation;
+    distance = FitDistance(aspect);
+    targetDistance = distance;
+    pivotAnimating = false;
+    orientationAnimating = false;
+    StopMotion();
 }
 
-void Camera::Fit(float aspect)
+double Camera::FitDistance(float aspect) const
 {
     const double vertical = kVerticalFieldOfView;
     const double horizontal = 2.0 * std::atan(std::tan(vertical * 0.5) * std::max(0.1f, aspect));
     const double limitingFov = std::min(vertical, horizontal);
-    distance = sceneRadius / std::max(0.05, std::sin(limitingFov * 0.5));
-    distance /= 0.93;
+    const double value = sceneRadius / std::max(0.05, std::sin(limitingFov * 0.5)) / 0.93;
+    return std::clamp(value, sceneRadius * 0.05, sceneRadius * 250.0);
+}
+
+void Camera::Fit(float aspect)
+{
+    targetDistance = FitDistance(aspect);
+    desiredX = homeX;
+    desiredY = homeY;
+    desiredZ = homeZ;
+    pivotFromX = targetX;
+    pivotFromY = targetY;
+    pivotFromZ = targetZ;
+    pivotAnimElapsed = 0.0;
+    pivotAnimating = true;
+    CancelInertia();
 }
 
 void Camera::Reset(float aspect)
 {
-    const XMVECTOR value = XMQuaternionRotationRollPitchYaw(-0.30f, 0.58f, 0.0f);
-    XMStoreFloat4(&orientation, value);
     Fit(aspect);
+    desiredOrientation = homeOrientation;
+    orientationFrom = orientation;
+    orientationAnimElapsed = 0.0;
+    orientationAnimating = true;
 }
 
-void Camera::Orbit(float deltaX, float deltaY)
+void Camera::ApplyOrbitAngles(float yawAngle, float pitchAngle)
 {
     XMVECTOR current = LoadOrientation(*this);
     const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
     const XMVECTOR right = XMVector3Rotate(XMVectorSet(1, 0, 0, 0), current);
-    const XMVECTOR yaw = XMQuaternionRotationAxis(worldUp, -deltaX * 0.008f);
-    const XMVECTOR pitch = XMQuaternionRotationAxis(right, -deltaY * 0.008f);
+    const XMVECTOR yaw = XMQuaternionRotationAxis(worldUp, yawAngle);
+    const XMVECTOR pitch = XMQuaternionRotationAxis(right, pitchAngle);
     current = XMQuaternionNormalize(XMQuaternionMultiply(XMQuaternionMultiply(current, yaw), pitch));
     XMStoreFloat4(&orientation, current);
+    orientationAnimating = false;
+}
+
+void Camera::Orbit(float deltaX, float deltaY)
+{
+    ApplyOrbitAngles(-deltaX * kOrbitPixelsToRadians, -deltaY * kOrbitPixelsToRadians);
 }
 
 void Camera::Look(float deltaX, float deltaY)
@@ -190,7 +249,25 @@ void Camera::Look(float deltaX, float deltaY)
     targetX = targetValue.x;
     targetY = targetValue.y;
     targetZ = targetValue.z;
+    pivotAnimating = false;
+    orientationAnimating = false;
     XMStoreFloat4(&orientation, current);
+}
+
+void Camera::ShiftPivot(double x, double y, double z)
+{
+    targetX += x;
+    targetY += y;
+    targetZ += z;
+    if (pivotAnimating)
+    {
+        pivotFromX += x;
+        pivotFromY += y;
+        pivotFromZ += z;
+        desiredX += x;
+        desiredY += y;
+        desiredZ += z;
+    }
 }
 
 void Camera::Pan(float deltaX, float deltaY, float viewportHeight)
@@ -202,15 +279,15 @@ void Camera::Pan(float deltaX, float deltaY, float viewportHeight)
     XMStoreFloat3(&right, XMVector3Rotate(XMVectorSet(1, 0, 0, 0), current));
     XMStoreFloat3(&up, XMVector3Rotate(XMVectorSet(0, 1, 0, 0), current));
     const double unitsPerPixel = 2.0 * distance * std::tan(kVerticalFieldOfView * 0.5) / viewportHeight;
-    targetX += (-right.x * deltaX + up.x * deltaY) * unitsPerPixel;
-    targetY += (-right.y * deltaX + up.y * deltaY) * unitsPerPixel;
-    targetZ += (-right.z * deltaX + up.z * deltaY) * unitsPerPixel;
+    ShiftPivot((-right.x * deltaX + up.x * deltaY) * unitsPerPixel,
+        (-right.y * deltaX + up.y * deltaY) * unitsPerPixel,
+        (-right.z * deltaX + up.z * deltaY) * unitsPerPixel);
 }
 
 void Camera::Dolly(float wheelSteps)
 {
-    distance *= std::exp(-static_cast<double>(wheelSteps) * 0.16);
-    distance = std::clamp(distance, sceneRadius * 0.025, sceneRadius * 250.0);
+    targetDistance *= std::exp(-static_cast<double>(wheelSteps) * 0.16);
+    targetDistance = std::clamp(targetDistance, sceneRadius * 0.025, sceneRadius * 250.0);
 }
 
 void Camera::MoveLocal(float rightAmount, float upAmount, float forwardAmount)
@@ -221,9 +298,7 @@ void Camera::MoveLocal(float rightAmount, float upAmount, float forwardAmount)
     const XMVECTOR forward = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), current);
     XMFLOAT3 movement{};
     XMStoreFloat3(&movement, right * rightAmount + up * upAmount + forward * forwardAmount);
-    targetX += movement.x;
-    targetY += movement.y;
-    targetZ += movement.z;
+    ShiftPivot(movement.x, movement.y, movement.z);
 }
 
 void Camera::Roll(float radians)
@@ -233,6 +308,174 @@ void Camera::Roll(float radians)
     const XMVECTOR roll = XMQuaternionRotationAxis(forward, radians);
     current = XMQuaternionNormalize(XMQuaternionMultiply(current, roll));
     XMStoreFloat4(&orientation, current);
+    orientationAnimating = false;
+}
+
+void Camera::SetInput(const FlightInput& value)
+{
+    input = value;
+}
+
+void Camera::SeedOrbitInertia(float velocityX, float velocityY)
+{
+    inertiaX = std::clamp(static_cast<double>(velocityX), -kInertiaMaxPixelsPerSecond, kInertiaMaxPixelsPerSecond);
+    inertiaY = std::clamp(static_cast<double>(velocityY), -kInertiaMaxPixelsPerSecond, kInertiaMaxPixelsPerSecond);
+}
+
+void Camera::CancelInertia()
+{
+    inertiaX = 0.0;
+    inertiaY = 0.0;
+}
+
+void Camera::StopMotion()
+{
+    velRight = 0.0;
+    velUp = 0.0;
+    velForward = 0.0;
+    rollRate = 0.0;
+    orbitRateX = 0.0;
+    orbitRateY = 0.0;
+    panRateX = 0.0;
+    panRateY = 0.0;
+    CancelInertia();
+}
+
+double Camera::FlightSpeed() const
+{
+    // Fly at a rate that scales with the scene, and slow down as the camera
+    // closes in on the subject for precision, faster when pulled back.
+    const double base = std::max(sceneRadius * 1.25, 1e-9);
+    const double zoomScale = std::clamp(distance / std::max(1e-9, sceneRadius * 2.0), 0.22, 2.8);
+    return base * zoomScale * (input.fast ? kBoostMultiplier : 1.0);
+}
+
+void Camera::Update(double deltaTime)
+{
+    const double flightEase = EaseFactor(deltaTime, kFlightAccelSeconds);
+
+    // Smoothed keyboard flight: velocity eases toward the intent instead of
+    // toggling, so motion ramps up on press and settles on release.
+    double directionRight = input.right;
+    double directionUp = input.up;
+    double directionForward = input.forward;
+    const double directionLength = std::sqrt(directionRight * directionRight + directionUp * directionUp +
+        directionForward * directionForward);
+    if (directionLength > 1.0)
+    {
+        directionRight /= directionLength;
+        directionUp /= directionLength;
+        directionForward /= directionLength;
+    }
+    const double speed = FlightSpeed();
+    const double stopEpsilon = std::max(speed * 0.01, 1e-9);
+    velRight += (directionRight * speed - velRight) * flightEase;
+    velUp += (directionUp * speed - velUp) * flightEase;
+    velForward += (directionForward * speed - velForward) * flightEase;
+    if (std::abs(velRight) < stopEpsilon) velRight = 0.0;
+    if (std::abs(velUp) < stopEpsilon) velUp = 0.0;
+    if (std::abs(velForward) < stopEpsilon) velForward = 0.0;
+    if (velRight != 0.0 || velUp != 0.0 || velForward != 0.0)
+    {
+        MoveLocal(static_cast<float>(velRight * deltaTime), static_cast<float>(velUp * deltaTime),
+            static_cast<float>(velForward * deltaTime));
+    }
+
+    const double rollTarget = input.roll * kRollBaseSpeed * (input.fast ? 2.0 : 1.0);
+    rollRate += (rollTarget - rollRate) * EaseFactor(deltaTime, kRollAccelSeconds);
+    if (std::abs(rollRate) < 0.01) rollRate = 0.0;
+    if (rollRate != 0.0) Roll(static_cast<float>(rollRate * deltaTime));
+
+    // Continuous, eased arrow-key orbit and Shift+arrow pan.
+    orbitRateX += (static_cast<double>(input.orbitX) - orbitRateX) * flightEase;
+    orbitRateY += (static_cast<double>(input.orbitY) - orbitRateY) * flightEase;
+    if (std::abs(orbitRateX) < 25.0) orbitRateX = 0.0;
+    if (std::abs(orbitRateY) < 25.0) orbitRateY = 0.0;
+    if (orbitRateX != 0.0 || orbitRateY != 0.0)
+    {
+        ApplyOrbitAngles(-static_cast<float>(orbitRateX * deltaTime) * kOrbitPixelsToRadians,
+            -static_cast<float>(orbitRateY * deltaTime) * kOrbitPixelsToRadians);
+    }
+
+    panRateX += (static_cast<double>(input.panX) - panRateX) * flightEase;
+    panRateY += (static_cast<double>(input.panY) - panRateY) * flightEase;
+    if (std::abs(panRateX) < 25.0) panRateX = 0.0;
+    if (std::abs(panRateY) < 25.0) panRateY = 0.0;
+    if (panRateX != 0.0 || panRateY != 0.0)
+    {
+        Pan(static_cast<float>(panRateX * deltaTime), static_cast<float>(panRateY * deltaTime), input.viewportHeight);
+    }
+
+    // Post-drag orbit inertia.
+    if (inertiaX != 0.0 || inertiaY != 0.0)
+    {
+        ApplyOrbitAngles(-static_cast<float>(inertiaX * deltaTime) * kOrbitPixelsToRadians,
+            -static_cast<float>(inertiaY * deltaTime) * kOrbitPixelsToRadians);
+        const double decay = deltaTime > 0.0 ? std::exp(-deltaTime / kInertiaDecaySeconds) : 0.0;
+        inertiaX *= decay;
+        inertiaY *= decay;
+        if (std::abs(inertiaX) < kInertiaMinPixelsPerSecond && std::abs(inertiaY) < kInertiaMinPixelsPerSecond)
+        {
+            CancelInertia();
+        }
+    }
+
+    // Eased wheel zoom toward the target distance.
+    if (distance != targetDistance)
+    {
+        distance += (targetDistance - distance) * EaseFactor(deltaTime, kZoomEaseSeconds);
+        if (std::fabs(std::log(distance / targetDistance)) < 1e-3) distance = targetDistance;
+    }
+
+    // Fit glide: ease the orbit pivot back to the model center.
+    if (pivotAnimating)
+    {
+        pivotAnimElapsed += deltaTime;
+        const double t = std::min(1.0, pivotAnimElapsed / kPivotAnimSeconds);
+        const double smooth = t * t * (3.0 - 2.0 * t);
+        targetX = pivotFromX + (desiredX - pivotFromX) * smooth;
+        targetY = pivotFromY + (desiredY - pivotFromY) * smooth;
+        targetZ = pivotFromZ + (desiredZ - pivotFromZ) * smooth;
+        if (t >= 1.0)
+        {
+            targetX = desiredX;
+            targetY = desiredY;
+            targetZ = desiredZ;
+            pivotAnimating = false;
+        }
+    }
+
+    // Reset glide: slerp the orientation back to the home view.
+    if (orientationAnimating)
+    {
+        orientationAnimElapsed += deltaTime;
+        const double t = std::min(1.0, orientationAnimElapsed / kOrientationAnimSeconds);
+        const float smooth = static_cast<float>(t * t * (3.0 - 2.0 * t));
+        const XMVECTOR from = XMLoadFloat4(&orientationFrom);
+        const XMVECTOR to = XMQuaternionNormalize(XMLoadFloat4(&desiredOrientation));
+        // Take the shortest arc: flip the target when its sign points away.
+        const float alignment = XMVectorGetX(XMVector4Dot(from, to));
+        const XMVECTOR shortest = alignment < 0.0f ? XMVectorNegate(to) : to;
+        XMVECTOR next = XMQuaternionNormalize(XMQuaternionSlerp(from, shortest, smooth));
+        if (t >= 1.0)
+        {
+            next = to;
+            orientationAnimating = false;
+        }
+        XMStoreFloat4(&orientation, next);
+    }
+}
+
+bool Camera::HasMotion() const
+{
+    if (velRight != 0.0 || velUp != 0.0 || velForward != 0.0) return true;
+    if (rollRate != 0.0) return true;
+    if (orbitRateX != 0.0 || orbitRateY != 0.0) return true;
+    if (panRateX != 0.0 || panRateY != 0.0) return true;
+    if (inertiaX != 0.0 || inertiaY != 0.0) return true;
+    if (pivotAnimating || orientationAnimating) return true;
+    if (distance != targetDistance) return true;
+    return false;
 }
 
 RECT CalculateErrorCardRect(int width, int height, int toolbarHeight, float dpiScale)

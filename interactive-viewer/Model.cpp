@@ -778,10 +778,23 @@ private:
             return false;
         }
         output.resize(accessor->count);
-        for (std::size_t element = 0; element < accessor->count; ++element)
+        if (stride == sizeof(XMFLOAT3))
         {
-            if ((element & 0x3fff) == 0 && Cancelled()) return false;
-            std::memcpy(&output[element], data + element * stride, sizeof(XMFLOAT3));
+            // Fast path for tightly packed float3 accessors: one bulk copy
+            // instead of an element-by-element loop.
+            if (Cancelled()) return false;
+            std::memcpy(output.data(), data, output.size() * sizeof(XMFLOAT3));
+        }
+        else
+        {
+            for (std::size_t element = 0; element < accessor->count; ++element)
+            {
+                if ((element & 0x3fff) == 0 && Cancelled()) return false;
+                std::memcpy(&output[element], data + element * stride, sizeof(XMFLOAT3));
+            }
+        }
+        for (std::size_t element = 0; element < output.size(); ++element)
+        {
             const XMFLOAT3& value = output[element];
             if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z))
             {
@@ -865,19 +878,32 @@ private:
             return false;
         }
         output.resize(accessor->count);
-        for (std::size_t element = 0; element < accessor->count; ++element)
+        if (accessor->componentType == 5125 && stride == sizeof(std::uint32_t))
         {
-            const std::uint8_t* source = data + element * stride;
-            std::uint32_t value = 0;
-            if (accessor->componentType == 5121) value = *source;
-            else if (accessor->componentType == 5123) { std::uint16_t small = 0; std::memcpy(&small, source, 2); value = small; }
-            else std::memcpy(&value, source, 4);
-            if (value >= vertexCount)
+            // Fast path for tightly packed 32-bit indices: bulk copy, then validate.
+            if (Cancelled()) return false;
+            std::memcpy(output.data(), data, output.size() * sizeof(std::uint32_t));
+        }
+        else
+        {
+            for (std::size_t element = 0; element < accessor->count; ++element)
+            {
+                if ((element & 0x3fff) == 0 && Cancelled()) return false;
+                const std::uint8_t* source = data + element * stride;
+                std::uint32_t value = 0;
+                if (accessor->componentType == 5121) value = *source;
+                else if (accessor->componentType == 5123) { std::uint16_t small = 0; std::memcpy(&small, source, 2); value = small; }
+                else std::memcpy(&value, source, 4);
+                output[element] = value;
+            }
+        }
+        for (std::size_t element = 0; element < output.size(); ++element)
+        {
+            if (output[element] >= vertexCount)
             {
                 error = L"A triangle index is outside its vertex accessor.";
                 return false;
             }
-            output[element] = value;
         }
         if (output.size() % 3 != 0)
         {
@@ -1038,6 +1064,11 @@ private:
                 if (materialIndex >= 0 && static_cast<std::size_t>(materialIndex) + 1 < colors_.size())
                     material = colors_[static_cast<std::size_t>(materialIndex) + 1];
             }
+
+            // Reserve the exact per-primitive growth up front so large models
+            // do not pay for repeated reallocation-and-copy cycles.
+            model_->vertices.reserve(model_->vertices.size() + positions.size());
+            model_->indices.reserve(model_->indices.size() + indices.size());
 
             const std::uint32_t base = static_cast<std::uint32_t>(model_->vertices.size());
             XMMATRIX normalMatrix = XMMatrixTranspose(XMMatrixInverse(nullptr, world));

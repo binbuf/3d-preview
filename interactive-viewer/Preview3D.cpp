@@ -19,8 +19,7 @@ namespace
 constexpr wchar_t kWindowClass[] = L"Preview3DWindow";
 constexpr wchar_t kApplicationName[] = L"3D Preview";
 constexpr UINT kLoadCompleteMessage = WM_APP + 2;
-constexpr UINT_PTR kLoadingTimer = 1;
-constexpr UINT_PTR kNavigationTimer = 2;
+constexpr float kArrowPixelsPerSecond = 340.0f;
 
 enum class DragMode { None, Orbit, Pan, Look };
 
@@ -62,7 +61,14 @@ struct ViewerApp
     bool moveDown = false;
     bool rollLeft = false;
     bool rollRight = false;
-    ULONGLONG lastNavigationTick = 0;
+    bool arrowLeft = false;
+    bool arrowRight = false;
+    bool arrowUp = false;
+    bool arrowDown = false;
+    double lastFrameSeconds = 0.0;
+    double orbitVelocityX = 0.0;
+    double orbitVelocityY = 0.0;
+    double lastOrbitMoveSeconds = 0.0;
     std::unordered_map<UINT32, POINT> touchPoints;
     POINT touchCenter{};
     double touchSpan = 0.0;
@@ -86,6 +92,19 @@ HWND gMainWindow = nullptr;
 int Scale(const ViewerApp& app, int logical)
 {
     return MulDiv(logical, static_cast<int>(app.dpi), 96);
+}
+
+double NowSeconds()
+{
+    static const double frequency = []() -> double
+    {
+        LARGE_INTEGER value{};
+        QueryPerformanceFrequency(&value);
+        return static_cast<double>(value.QuadPart);
+    }();
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    return static_cast<double>(counter.QuadPart) / frequency;
 }
 
 float ViewportAspect(const ViewerApp& app)
@@ -167,7 +186,8 @@ bool CanNavigate(const ViewerApp& app)
 bool HasNavigationInput(const ViewerApp& app)
 {
     return app.moveForward || app.moveBackward || app.moveLeft || app.moveRight ||
-        app.moveUp || app.moveDown || app.rollLeft || app.rollRight;
+        app.moveUp || app.moveDown || app.rollLeft || app.rollRight ||
+        app.arrowLeft || app.arrowRight || app.arrowUp || app.arrowDown;
 }
 
 void StopNavigation(ViewerApp& app)
@@ -180,8 +200,11 @@ void StopNavigation(ViewerApp& app)
     app.moveDown = false;
     app.rollLeft = false;
     app.rollRight = false;
-    app.lastNavigationTick = 0;
-    KillTimer(app.window, kNavigationTimer);
+    app.arrowLeft = false;
+    app.arrowRight = false;
+    app.arrowUp = false;
+    app.arrowDown = false;
+    app.camera.StopMotion();
 }
 
 bool SetNavigationKey(ViewerApp& app, WPARAM key, bool pressed)
@@ -197,20 +220,13 @@ bool SetNavigationKey(ViewerApp& app, WPARAM key, bool pressed)
     case 'Q': state = &app.moveDown; break;
     case 'Z': state = &app.rollLeft; break;
     case 'C': state = &app.rollRight; break;
+    case VK_LEFT: state = &app.arrowLeft; break;
+    case VK_RIGHT: state = &app.arrowRight; break;
+    case VK_UP: state = &app.arrowUp; break;
+    case VK_DOWN: state = &app.arrowDown; break;
     default: return false;
     }
-    if (*state == pressed) return true;
     *state = pressed;
-    if (pressed && CanNavigate(app))
-    {
-        if (!app.lastNavigationTick) app.lastNavigationTick = GetTickCount64();
-        SetTimer(app.window, kNavigationTimer, 16, nullptr);
-    }
-    else if (!HasNavigationInput(app))
-    {
-        app.lastNavigationTick = 0;
-        KillTimer(app.window, kNavigationTimer);
-    }
     return true;
 }
 
@@ -330,7 +346,6 @@ void SetFailure(ViewerApp& app, const std::wstring& summary, const std::wstring&
     app.errorDetails = details;
     app.failedPath = failedPath;
     app.status.clear();
-    KillTimer(app.window, kLoadingTimer);
     StopNavigation(app);
     UpdateButtonAvailability(app);
     LayoutControls(app);
@@ -343,7 +358,6 @@ void CancelOpen(ViewerApp& app)
     if (app.cancellation) app.cancellation->store(true, std::memory_order_relaxed);
     ++app.generation;
     app.cancellation.reset();
-    KillTimer(app.window, kLoadingTimer);
     app.state = app.renderer.HasModel() ? ViewerState::Ready : ViewerState::Empty;
     if (app.renderer.HasModel()) app.filename = FileNameFromPath(app.currentPath);
     else app.filename.clear();
@@ -397,7 +411,6 @@ void BeginOpen(ViewerApp& app, const std::wstring& path)
     UpdateTitle(app);
     UpdateButtonAvailability(app);
     LayoutControls(app);
-    SetTimer(app.window, kLoadingTimer, 33, nullptr);
     InvalidateRect(app.window, nullptr, FALSE);
 
     std::thread([window, generation, path, cancellation, alive]()
@@ -508,7 +521,8 @@ void ShowControls(HWND owner)
         L"Fit\tF or double-click\n"
         L"Reset\tR\n"
         L"Open\tCtrl+O\n"
-        L"Cancel open\tEsc",
+        L"Cancel open\tEsc\n\n"
+        L"Flight, zoom, fit, and reset are smoothly eased; orbit keeps a gentle inertia after a drag.",
         L"3D Preview controls", MB_OK | MB_ICONINFORMATION);
 }
 
@@ -596,41 +610,86 @@ void HandleCommand(ViewerApp& app, int id)
     }
 }
 
-void UpdateNavigation(ViewerApp& app)
+void TrackOrbitVelocity(ViewerApp& app, float deltaX, float deltaY)
 {
-    const ULONGLONG now = GetTickCount64();
-    if (!CanNavigate(app) || !HasNavigationInput(app))
+    const double now = NowSeconds();
+    const double gap = now - app.lastOrbitMoveSeconds;
+    if (gap > 0.0005 && gap < 0.15)
     {
-        StopNavigation(app);
-        return;
+        app.orbitVelocityX = app.orbitVelocityX * 0.62 + (deltaX / gap) * 0.38;
+        app.orbitVelocityY = app.orbitVelocityY * 0.62 + (deltaY / gap) * 0.38;
     }
-
-    if (!app.lastNavigationTick)
+    else
     {
-        app.lastNavigationTick = now;
-        return;
+        app.orbitVelocityX = 0.0;
+        app.orbitVelocityY = 0.0;
     }
-    const float elapsed = std::min(0.05f, static_cast<float>(now - app.lastNavigationTick) / 1000.0f);
-    app.lastNavigationTick = now;
+    app.lastOrbitMoveSeconds = now;
+}
 
-    float right = (app.moveRight ? 1.0f : 0.0f) - (app.moveLeft ? 1.0f : 0.0f);
-    float up = (app.moveUp ? 1.0f : 0.0f) - (app.moveDown ? 1.0f : 0.0f);
-    float forward = (app.moveForward ? 1.0f : 0.0f) - (app.moveBackward ? 1.0f : 0.0f);
-    const float length = std::sqrt(right * right + up * up + forward * forward);
-    if (length > 1.0f)
+FlightInput BuildFlightInput(const ViewerApp& app)
+{
+    FlightInput input;
+    if (!CanNavigate(app)) return input;
+    input.right = (app.moveRight ? 1.0f : 0.0f) - (app.moveLeft ? 1.0f : 0.0f);
+    input.up = (app.moveUp ? 1.0f : 0.0f) - (app.moveDown ? 1.0f : 0.0f);
+    input.forward = (app.moveForward ? 1.0f : 0.0f) - (app.moveBackward ? 1.0f : 0.0f);
+    input.roll = (app.rollRight ? 1.0f : 0.0f) - (app.rollLeft ? 1.0f : 0.0f);
+    const float arrowsX = (app.arrowRight ? 1.0f : 0.0f) - (app.arrowLeft ? 1.0f : 0.0f);
+    const float arrowsY = (app.arrowDown ? 1.0f : 0.0f) - (app.arrowUp ? 1.0f : 0.0f);
+    input.fast = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    if (input.fast)
     {
-        right /= length;
-        up /= length;
-        forward /= length;
+        input.panX = arrowsX * kArrowPixelsPerSecond;
+        input.panY = arrowsY * kArrowPixelsPerSecond;
     }
+    else
+    {
+        input.orbitX = arrowsX * kArrowPixelsPerSecond;
+        input.orbitY = arrowsY * kArrowPixelsPerSecond;
+    }
+    RECT client{};
+    GetClientRect(app.window, &client);
+    input.viewportHeight = static_cast<float>(std::max(1L, client.bottom - app.toolbarHeight));
+    return input;
+}
 
-    const bool fast = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    const float distance = static_cast<float>(app.camera.sceneRadius) * (fast ? 4.0f : 1.0f) * elapsed;
-    if (length > 0.0f) app.camera.MoveLocal(right * distance, up * distance, forward * distance);
+bool IsAnimating(const ViewerApp& app)
+{
+    return app.state == ViewerState::Loading || HasNavigationInput(app) || app.camera.HasMotion();
+}
 
-    const float roll = (app.rollRight ? 1.0f : 0.0f) - (app.rollLeft ? 1.0f : 0.0f);
-    if (roll != 0.0f) app.camera.Roll(roll * elapsed * (fast ? 2.4f : 1.2f));
-    InvalidateRect(app.window, nullptr, FALSE);
+void RenderScene(ViewerApp& app)
+{
+    OverlayInfo overlay;
+    overlay.state = app.state;
+    overlay.filename = app.filename;
+    overlay.status = app.status;
+    overlay.errorSummary = app.errorSummary;
+    overlay.errorDetails = app.errorDetails;
+    overlay.warning = app.warning;
+    overlay.animationPhase = static_cast<float>(GetTickCount64() % 1400) / 1400.0f;
+    overlay.dpiScale = app.dpiScale;
+    overlay.toolbarHeight = app.toolbarHeight;
+    overlay.hasModel = app.renderer.HasModel();
+    app.renderer.Render(app.camera, overlay);
+}
+
+void RenderFrame(ViewerApp& app)
+{
+    if (!app.rendererReady) return;
+    const double now = NowSeconds();
+    double elapsed = 0.0;
+    if (app.lastFrameSeconds > 0.0)
+    {
+        const double gap = now - app.lastFrameSeconds;
+        if (gap < 0.25) elapsed = std::min(0.1, gap);
+    }
+    app.lastFrameSeconds = now;
+    app.camera.SetInput(BuildFlightInput(app));
+    app.camera.Update(elapsed);
+    RenderScene(app);
+    ValidateRect(app.window, nullptr);
 }
 
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -691,18 +750,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         HDC dc = BeginPaint(window, &paint);
         if (app->rendererReady)
         {
-            OverlayInfo overlay;
-            overlay.state = app->state;
-            overlay.filename = app->filename;
-            overlay.status = app->status;
-            overlay.errorSummary = app->errorSummary;
-            overlay.errorDetails = app->errorDetails;
-            overlay.warning = app->warning;
-            overlay.animationPhase = static_cast<float>(GetTickCount64() % 1400) / 1400.0f;
-            overlay.dpiScale = app->dpiScale;
-            overlay.toolbarHeight = app->toolbarHeight;
-            overlay.hasModel = app->renderer.HasModel();
-            app->renderer.Render(app->camera, overlay);
+            RenderScene(*app);
         }
         else RenderFallback(*app, dc);
         EndPaint(window, &paint);
@@ -743,10 +791,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         info->ptMinTrackSize.y = Scale(*app, 360);
         return 0;
     }
-    case WM_TIMER:
-        if (wParam == kLoadingTimer && app->state == ViewerState::Loading) InvalidateRect(window, nullptr, FALSE);
-        else if (wParam == kNavigationTimer) UpdateNavigation(*app);
-        return 0;
     case WM_DROPFILES:
     {
         HDROP drop = reinterpret_cast<HDROP>(wParam);
@@ -832,6 +876,10 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             SetCapture(window);
             app->dragMode = (GetKeyState(VK_SHIFT) & 0x8000) ? DragMode::Pan : DragMode::Orbit;
             app->lastPointer = POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            app->camera.CancelInertia();
+            app->orbitVelocityX = 0.0;
+            app->orbitVelocityY = 0.0;
+            app->lastOrbitMoveSeconds = NowSeconds();
         }
         return 0;
     case WM_MBUTTONDOWN:
@@ -859,7 +907,11 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             const float deltaX = static_cast<float>(pointer.x - app->lastPointer.x);
             const float deltaY = static_cast<float>(pointer.y - app->lastPointer.y);
             app->lastPointer = pointer;
-            if (app->dragMode == DragMode::Orbit) app->camera.Orbit(deltaX, deltaY);
+            if (app->dragMode == DragMode::Orbit)
+            {
+                TrackOrbitVelocity(*app, deltaX, deltaY);
+                app->camera.Orbit(deltaX, deltaY);
+            }
             else if (app->dragMode == DragMode::Look) app->camera.Look(deltaX, deltaY);
             else
             {
@@ -870,6 +922,15 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         }
         return 0;
     case WM_LBUTTONUP:
+        if (GetCapture() == window && app->dragMode == DragMode::Orbit && CanNavigate(*app) &&
+            NowSeconds() - app->lastOrbitMoveSeconds < 0.07)
+        {
+            app->camera.SeedOrbitInertia(static_cast<float>(app->orbitVelocityX),
+                static_cast<float>(app->orbitVelocityY));
+        }
+        if (GetCapture() == window) ReleaseCapture();
+        app->dragMode = DragMode::None;
+        return 0;
     case WM_MBUTTONUP:
     case WM_RBUTTONUP:
         if (GetCapture() == window) ReleaseCapture();
@@ -901,17 +962,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         else if (wParam == 'R') app->camera.Reset(ViewportAspect(*app));
         else if (wParam == VK_OEM_PLUS || wParam == VK_ADD) app->camera.Dolly(1.0f);
         else if (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT) app->camera.Dolly(-1.0f);
-        else if (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP || wParam == VK_DOWN)
-        {
-            const float x = wParam == VK_LEFT ? -8.0f : (wParam == VK_RIGHT ? 8.0f : 0.0f);
-            const float y = wParam == VK_UP ? -8.0f : (wParam == VK_DOWN ? 8.0f : 0.0f);
-            if (GetKeyState(VK_SHIFT) & 0x8000)
-            {
-                RECT client{}; GetClientRect(window, &client);
-                app->camera.Pan(x, y, static_cast<float>(client.bottom - app->toolbarHeight));
-            }
-            else app->camera.Orbit(x, y);
-        }
         else break;
         InvalidateRect(window, nullptr, FALSE);
         return 0;
@@ -933,7 +983,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         std::unique_ptr<CompleteMessage> complete(reinterpret_cast<CompleteMessage*>(lParam));
         if (!complete || complete->generation != app->generation) return 0;
         app->cancellation.reset();
-        KillTimer(window, kLoadingTimer);
         if (complete->result.cancelled)
         {
             app->state = app->renderer.HasModel() ? ViewerState::Ready : ViewerState::Empty;
@@ -974,8 +1023,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         app->closing = true;
         app->alive->store(false, std::memory_order_relaxed);
         if (app->cancellation) app->cancellation->store(true, std::memory_order_relaxed);
-        KillTimer(window, kLoadingTimer);
-        KillTimer(window, kNavigationTimer);
         if (app->buttonFont) { DeleteObject(app->buttonFont); app->buttonFont = nullptr; }
         PostQuitMessage(0);
         return 0;
@@ -1041,17 +1088,46 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
 
     HACCEL accelerators = LoadAcceleratorsW(instance, MAKEINTRESOURCEW(IDC_PREVIEW3D));
     MSG message{};
-    while (GetMessageW(&message, nullptr, 0, 0) > 0)
+    int exitCode = 0;
+    bool quitting = false;
+    while (!quitting)
     {
-        if (gMainWindow && IsDialogMessageW(gMainWindow, &message)) continue;
-        if (!TranslateAcceleratorW(gMainWindow, accelerators, &message))
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
         {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
+            if (message.message == WM_QUIT)
+            {
+                exitCode = static_cast<int>(message.wParam);
+                quitting = true;
+                break;
+            }
+            if (gMainWindow && IsDialogMessageW(gMainWindow, &message)) continue;
+            if (!TranslateAcceleratorW(gMainWindow, accelerators, &message))
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
         }
+        if (quitting) break;
+
+        // Continuous, vsync-paced rendering while anything is in motion:
+        // flight keys, easing, inertia, fit/reset glides, or the load spinner.
+        // The loop blocks in MsgWaitForMultipleObjectsEx otherwise, so a still
+        // viewport costs no CPU or GPU.
+        if (gMainWindow && app.rendererReady && !IsIconic(gMainWindow) && IsAnimating(app))
+        {
+            RenderFrame(app);
+            continue;
+        }
+        if (gMainWindow && GetUpdateRect(gMainWindow, nullptr, FALSE))
+        {
+            if (app.rendererReady && !IsIconic(gMainWindow)) RenderFrame(app);
+            else RedrawWindow(gMainWindow, nullptr, nullptr, RDW_INTERNALPAINT);
+            continue;
+        }
+        MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
 
     if (gBackgroundBrush) DeleteObject(gBackgroundBrush);
     if (SUCCEEDED(comResult)) CoUninitialize();
-    return static_cast<int>(message.wParam);
+    return exitCode;
 }
