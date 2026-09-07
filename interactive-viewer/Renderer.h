@@ -38,14 +38,27 @@ struct OverlayInfo
     std::wstring warning;
     float animationPhase = 0.0f;
     float dpiScale = 1.0f;
+    // Reserved viewport inset: how much of the client area the title/bottom
+    // bars claim away from the 3D viewport (Preview3D.cpp's ViewportAspect,
+    // and Renderer::Render's own viewportTop/bottomInset). Both collapse to 0
+    // in Fullscreen so the viewport fills the whole monitor.
     int toolbarHeight = 40;
     int bottomBarHeight = 0;
+    // The bars' own drawn/hit-tested height — always the real height
+    // whenever the bar should be visible, Fullscreen included, where the two
+    // bars become a floating toolbar overlaying the (now full-monitor)
+    // viewport instead of pushing it down. Used by DrawTitleBar (via
+    // Chrome::TitleBarRect, which is built from this same raw height) /
+    // DrawBottomBar / DrawInfoPanel and the bottom-anchored HUD chrome —
+    // never by the viewport sizing above.
+    int barToolbarHeight = 40;
+    int barBottomBarHeight = 0;
     int infoPanelWidth = 0;   // 0 when the Information panel is closed
     std::vector<InfoPanelSection> infoPanelSections;   // only meaningful while infoPanelWidth > 0
     float zoomPercent = 100.0f;   // 100 == the default Fit framing distance
-    RECT zoomTrackRect{};         // client px, the D2D-drawn zoom slider's track, valid while bottomBarHeight > 0
+    RECT zoomTrackRect{};         // client px, the D2D-drawn zoom slider's track, valid while barBottomBarHeight > 0
     float zoomSliderT = 0.0f;     // 0..1 normalized zoom-slider thumb position
-    RECT infoButtonRect{};        // client px, bottom-bar Info button, just left of the zoom slider
+    RECT infoButtonRect{};        // client px, docked at the far left of the bottom bar
     bool infoButtonHover = false;
     bool infoButtonPressed = false;
     RECT fullscreenButtonRect{};  // client px, bottom-bar Fullscreen toggle, right of the percent readout

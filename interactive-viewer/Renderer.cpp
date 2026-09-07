@@ -1136,18 +1136,24 @@ struct Renderer::Impl
     }
 
     // Photos-style bottom bar: a bar strip matching the title bar's fill,
-    // with a D2D-drawn zoom slider (ZoomTrackRect, Preview3D.cpp — same
-    // split as the Speed flyout track) docked bottom-right next to the
-    // zoom-percent readout, the Info button just left of it, and the
-    // Fullscreen toggle at the very right. Only drawn while a model is
-    // loaded — see OverlayInfo::bottomBarHeight, which the app zeroes out
+    // with the Info button docked at the far left, a D2D-drawn zoom slider
+    // (ZoomTrackRect, Preview3D.cpp — same split as the Speed flyout track)
+    // docked bottom-right next to the zoom-percent readout, and the
+    // Fullscreen toggle at the very right. Only drawn while a model is loaded
+    // — see OverlayInfo::barBottomBarHeight, which the app zeroes out
     // otherwise. All three button rects are computed by Preview3D.cpp (same
     // split as the zoom track) so hit-testing and drawing never drift apart.
+    // Drawn (as a floating toolbar over the viewport, slightly translucent)
+    // even in Fullscreen, where OverlayInfo::bottomBarHeight — the *reserved*
+    // viewport inset — has already collapsed to 0; barBottomBarHeight is the
+    // bar's own always-real height, so it keeps showing (and the Fullscreen
+    // toggle stays reachable) instead of vanishing along with that space.
     void DrawBottomBar(const OverlayInfo& overlay, float clientWidth, float clientHeight, float scale)
     {
-        if (overlay.bottomBarHeight <= 0) return;
-        const float barTop = clientHeight - static_cast<float>(overlay.bottomBarHeight);
-        SetBrush(D2D1::ColorF(0x2C2C2E));
+        if (overlay.barBottomBarHeight <= 0) return;
+        const float barTop = clientHeight - static_cast<float>(overlay.barBottomBarHeight);
+        const float fillAlpha = overlay.isFullscreen ? 0.88f : 1.0f;
+        SetBrush(D2D1::ColorF(0x2C2C2E, fillAlpha));
         overlayTarget->FillRectangle(D2D1::RectF(0, barTop, clientWidth, clientHeight), brush.Get());
         SetBrush(D2D1::ColorF(0x3A3A3C));
         overlayTarget->FillRectangle(D2D1::RectF(0, barTop, clientWidth, barTop + 1.0f), brush.Get());
@@ -1205,8 +1211,8 @@ struct Renderer::Impl
         if (overlay.infoPanelWidth <= 0) return;
         const float panelWidth = static_cast<float>(overlay.infoPanelWidth);
         const float left = clientWidth - panelWidth;
-        const float top = static_cast<float>(overlay.toolbarHeight);
-        const float bottom = clientHeight - static_cast<float>(overlay.bottomBarHeight);
+        const float top = static_cast<float>(overlay.barToolbarHeight);
+        const float bottom = clientHeight - static_cast<float>(overlay.barBottomBarHeight);
 
         SetBrush(D2D1::ColorF(0x242426));
         overlayTarget->FillRectangle(D2D1::RectF(left, top, clientWidth, bottom), brush.Get());
@@ -1255,7 +1261,10 @@ struct Renderer::Impl
     {
         const RECT barRectI = chrome.TitleBarRect();
         const float barHeight = static_cast<float>(barRectI.bottom);
-        SetBrush(D2D1::ColorF(0x2C2C2E));
+        // Fullscreen: same strip, drawn slightly translucent (matching
+        // DrawBottomBar) so it reads as a floating toolbar over the viewport
+        // rather than the fully opaque, space-reserving windowed title bar.
+        SetBrush(D2D1::ColorF(0x2C2C2E, overlay.isFullscreen ? 0.88f : 1.0f));
         overlayTarget->FillRectangle(D2D1::RectF(0, 0, clientWidth, barHeight), brush.Get());
         SetBrush(D2D1::ColorF(0x3A3A3C));
         overlayTarget->FillRectangle(D2D1::RectF(0, barHeight - 1, clientWidth, barHeight), brush.Get());
@@ -1291,6 +1300,7 @@ struct Renderer::Impl
         auto drawSystemButton = [&](Chrome::Part part, auto drawGlyph, bool closeButton)
         {
             const Chrome::ButtonState& state = chrome.Button(part);
+            if (!state.visible) return;
             const D2D1_RECT_F rect = ToRectF(state.rect);
             const bool hovered = chrome.hover == part;
             const bool pressedNow = chrome.pressed == part;
@@ -1405,14 +1415,14 @@ struct Renderer::Impl
         if (!overlayTarget || !brush) return;
         if (!CreateTextFormats(overlay.dpiScale)) return;
         const float scale = overlay.dpiScale;
-        const float toolbar = static_cast<float>(overlay.toolbarHeight);
+        const float toolbar = static_cast<float>(overlay.barToolbarHeight);
         const float clientWidth = static_cast<float>(width);
         const float clientHeight = static_cast<float>(height);
         // Bottom-anchored chrome (status pill, warning badge, HUD pills) sits
         // above the bottom bar and left of the Information panel, both of
         // which are only reserved while a model is loaded (see
-        // OverlayInfo::bottomBarHeight/infoPanelWidth).
-        const float contentBottom = clientHeight - static_cast<float>(overlay.bottomBarHeight);
+        // OverlayInfo::barBottomBarHeight/infoPanelWidth).
+        const float contentBottom = clientHeight - static_cast<float>(overlay.barBottomBarHeight);
         const float contentRight = clientWidth - static_cast<float>(overlay.infoPanelWidth);
 
         overlayTarget->BeginDraw();
@@ -1420,12 +1430,17 @@ struct Renderer::Impl
         // model is loading — this used to be skipped entirely during
         // ViewerState::Loading, which is what made the window briefly
         // uncontrollable right after launching with a file or dropping one
-        // in) but not at all in Fullscreen: Preview3D.cpp's
-        // EffectiveToolbarHeight already collapses the reserved space to 0
-        // there and bypasses the title bar's hit-testing to match, so the
-        // viewport can fill the whole window with no dead strip of
-        // now-unreachable chrome at the top.
-        if (!overlay.isFullscreen) DrawTitleBar(overlay, chrome, clientWidth, scale);
+        // in) — including in Fullscreen, where it becomes a floating toolbar
+        // (Chrome::UpdateLayout hides Minimize/Maximize/Close/Open With there
+        // instead, keeping just the action buttons) drawn over the
+        // full-monitor viewport rather than pushed out of it: Preview3D.cpp's
+        // EffectiveToolbarHeight still collapses the *reserved* space to 0 in
+        // that state and bypasses the title bar's NC hit-testing to match, so
+        // the viewport fills the whole window with no dead strip of chrome
+        // reserved at the top, while OverlayInfo::barToolbarHeight (`toolbar`
+        // above) keeps its real value so the bar still draws and its buttons
+        // still hit-test as ordinary client-area ones.
+        DrawTitleBar(overlay, chrome, clientWidth, scale);
         if (overlay.state == ViewerState::Loading)
         {
             const float centerX = clientWidth * 0.5f;

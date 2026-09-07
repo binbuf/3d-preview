@@ -194,21 +194,29 @@ bool HasNavigableModel(const ViewerApp& app)
     return app.state == ViewerState::Ready && app.renderer.HasModel();
 }
 
-// Effective bottom-bar inset for layout purposes: reserved only while a
-// model is loaded, matching HasNavigableModel, and collapsed to 0 in
-// Fullscreen so the viewport reclaims that space (see EffectiveToolbarHeight).
+// Reserved bottom-bar VIEWPORT inset (not the bar's own drawn height, see
+// OverlayInfo::barBottomBarHeight/RenderScene below): space is only reserved
+// while a model is loaded, matching HasNavigableModel, and collapsed to 0 in
+// Fullscreen so the viewport reclaims that space and fills the whole monitor
+// — the bar itself keeps drawing there as a floating toolbar overlaying that
+// now-full-bleed viewport instead of vanishing along with the reserved space.
 int EffectiveBottomBarHeight(const ViewerApp& app)
 {
     return (HasNavigableModel(app) && !app.isFullscreen) ? app.bottomBarHeight : 0;
 }
 
-// Effective title-bar inset for layout/input purposes: the real toolbarHeight
-// normally, but 0 in Fullscreen — Renderer::DrawOverlay skips DrawTitleBar
-// entirely in that state (see OverlayInfo::isFullscreen), and the viewport,
-// gizmo, and hit-testing all need to agree that the whole client area is now
-// live so Fullscreen actually reclaims the space the title bar and its
-// caption buttons used to occupy, rather than just resizing the window over
-// the taskbar while leaving a dead strip of chrome at the top.
+// Reserved title-bar VIEWPORT inset (see EffectiveBottomBarHeight just
+// above): the real toolbarHeight normally, but 0 in Fullscreen so the
+// viewport, gizmo, and hit-testing all agree the whole client area is now
+// live — Fullscreen actually reclaims the space the title bar used to
+// occupy, rather than just resizing the window over the taskbar while
+// leaving a dead strip of chrome at the top. The title bar keeps drawing
+// there regardless, as a floating toolbar over that full-bleed viewport
+// (OverlayInfo::barToolbarHeight, always the real height); NC hit-testing
+// (WM_NCHITTEST) still uses this Effective value so a topmost, monitor-
+// filling window in that state has no HTCAPTION/system-caption-button role,
+// while the plain client-area mouse handlers use the real app.toolbarHeight
+// instead so the floating toolbar's own buttons stay clickable.
 int EffectiveToolbarHeight(const ViewerApp& app)
 {
     return app.isFullscreen ? 0 : app.toolbarHeight;
@@ -405,7 +413,7 @@ void UpdateChromeLayout(ViewerApp& app)
     RECT client{};
     GetClientRect(app.window, &client);
     app.chrome.UpdateLayout(client.right, app.toolbarHeight, app.dpiScale,
-        HasNavigableModel(app), IsZoomed(app.window) != FALSE);
+        HasNavigableModel(app), IsZoomed(app.window) != FALSE, app.isFullscreen);
 }
 
 // Speed flyout panel/track geometry, shared by drawing (RenderScene) and
@@ -666,7 +674,12 @@ constexpr int kBottomBarButtonWidth = 34;
 constexpr int kBottomBarButtonHeight = 28;
 
 // Bottom-bar button rect centered vertically in the bar, right edge at
-// `right` — shared layout math for Info and Fullscreen (below).
+// `right` — shared layout math for the Fullscreen toggle (below). Always
+// measured from the full client width, not the (possibly narrower) viewport
+// left of the Information panel — the bottom bar spans the whole window and
+// sits below where that panel stops (InfoPanel::ComputeInfoPanelLayout), so
+// anchoring here to the client edge instead means opening/closing the panel
+// never shifts these buttons.
 RECT BottomBarButtonRect(const ViewerApp& app, int right)
 {
     RECT client{};
@@ -684,9 +697,8 @@ RECT FullscreenButtonRect(const ViewerApp& app)
 {
     RECT client{};
     GetClientRect(app.window, &client);
-    const int contentRight = client.right - InfoPanelWidthPixels(app);
     const int margin = Scale(app, 14);
-    return BottomBarButtonRect(app, contentRight - margin);
+    return BottomBarButtonRect(app, client.right - margin);
 }
 
 // Compact zoom slider, docked in the bottom-right of the bottom bar just
@@ -711,12 +723,20 @@ RECT ZoomTrackRect(const ViewerApp& app)
     return RECT{ left, centerY - halfHeight, right, centerY + halfHeight };
 }
 
-// Info panel toggle: just left of the zoom slider, on the bottom bar.
+// Info panel toggle: docked at the very left of the bottom bar, independent
+// of the zoom/fullscreen group anchored to the right — so it never moves
+// when the Information panel it opens and closes changes the viewport width,
+// and the zoom/fullscreen group never moves when it's clicked.
 RECT InfoButtonRect(const ViewerApp& app)
 {
-    const RECT track = ZoomTrackRect(app);
-    const int gap = Scale(app, 14);
-    return BottomBarButtonRect(app, track.left - gap);
+    RECT client{};
+    GetClientRect(app.window, &client);
+    const int margin = Scale(app, 14);
+    const int width = Scale(app, kBottomBarButtonWidth);
+    const int height = Scale(app, kBottomBarButtonHeight);
+    const int barY = client.bottom - app.bottomBarHeight;
+    const int centerY = barY + app.bottomBarHeight / 2;
+    return RECT{ margin, centerY - height / 2, margin + width, centerY + height / 2 };
 }
 
 // What ComputeTooltipInfo resolves the current hover into: an id (0 == none,
@@ -1392,6 +1412,11 @@ void RenderScene(ViewerApp& app)
     overlay.dpiScale = app.dpiScale;
     overlay.toolbarHeight = EffectiveToolbarHeight(app);
     overlay.bottomBarHeight = EffectiveBottomBarHeight(app);
+    // Always the bars' real height, Fullscreen included — see
+    // OverlayInfo::barToolbarHeight/barBottomBarHeight (Renderer.h) for why
+    // these are kept separate from the viewport-inset pair just above.
+    overlay.barToolbarHeight = app.toolbarHeight;
+    overlay.barBottomBarHeight = HasNavigableModel(app) ? app.bottomBarHeight : 0;
     overlay.infoPanelWidth = InfoPanelWidthPixels(app);
     if (overlay.infoPanelWidth > 0 && app.loadedModel)
     {
@@ -1400,7 +1425,7 @@ void RenderScene(ViewerApp& app)
             app.loadedModel->boundsMin, app.loadedModel->boundsMax);
     }
     overlay.zoomPercent = ZoomPercentFor(app.camera);
-    if (overlay.bottomBarHeight > 0)
+    if (overlay.barBottomBarHeight > 0)
     {
         overlay.zoomTrackRect = ZoomTrackRect(app);
         overlay.zoomSliderT = static_cast<float>(ZoomSliderPositionFor(app.camera)) / kZoomSliderMax;
@@ -1536,6 +1561,16 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_NCCALCSIZE:
         if (wParam)
         {
+            if (app->isFullscreen)
+            {
+                // Give the client area the ENTIRE proposed window rect (all
+                // four insets, not just the top) — otherwise the still-
+                // registered WS_THICKFRAME resize-border insets on the
+                // left/right/bottom eat a few pixels off the monitor-filling
+                // rect ToggleFullscreen requests, leaving a sliver of desktop
+                // visible along those edges instead of covering the monitor.
+                return 0;
+            }
             NCCALCSIZE_PARAMS& params = *reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
             const LONG proposedTop = params.rgrc[0].top;
             DefWindowProcW(window, message, wParam, lParam);
@@ -1564,6 +1599,36 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
 
         POINT clientPoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(window, &clientPoint);
+
+        // Top-edge/top-corner resize: WM_NCCALCSIZE above hands the entire
+        // top inset back to the client area, so DefWindowProc's own hit-test
+        // (just consulted above) never reports HTTOP/HTTOPLEFT/HTTOPRIGHT for
+        // it — the standard gotcha with this "keep a resizable frame but
+        // remove the native caption" recipe (Windows Terminal's non-client
+        // island window has the same manual carve-out). Detect that strip
+        // ourselves, using the same metrics DefWindowProc uses for its own
+        // border, so the window can still be resized — including diagonally
+        // from its top corners — by dragging near the top edge.
+        if (!app->isFullscreen && !IsZoomed(window))
+        {
+            const int resizeBorder = GetSystemMetrics(SM_CXPADDEDBORDER) + GetSystemMetrics(SM_CYSIZEFRAME);
+            if (clientPoint.y < resizeBorder)
+            {
+                RECT client{};
+                GetClientRect(window, &client);
+                const int cornerWidth = resizeBorder * 2;
+                if (clientPoint.x < cornerWidth) return HTTOPLEFT;
+                if (clientPoint.x >= client.right - cornerWidth) return HTTOPRIGHT;
+                return HTTOP;
+            }
+        }
+
+        // In Fullscreen, EffectiveToolbarHeight collapses to 0: the floating
+        // toolbar (drawn and hit-tested as an ordinary client-area overlay by
+        // the WM_LBUTTONDOWN/MOUSEMOVE/UP handlers below, same as the bottom
+        // bar's buttons) has no non-client role, so every point here reports
+        // HTCLIENT rather than routing through Chrome::HitTest's HTCAPTION —
+        // dragging a topmost, monitor-filling window would just look broken.
         if (clientPoint.y >= EffectiveToolbarHeight(*app)) return HTCLIENT;
         switch (app->chrome.HitTest(clientPoint))
         {
@@ -1844,7 +1909,11 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             // so clicking a different title-bar button both dismisses the
             // flyout and performs that click in one action.
         }
-        if (downPoint.y < EffectiveToolbarHeight(*app))
+        // The raw toolbarHeight, not EffectiveToolbarHeight (0 in Fullscreen)
+        // — the action buttons stay clickable there as a floating toolbar
+        // overlaying the full-monitor viewport (WM_NCHITTEST above already
+        // routes these points to plain client messages instead of NC ones).
+        if (downPoint.y < app->toolbarHeight)
         {
             const Chrome::Part part = app->chrome.HitTest(downPoint);
             if (part != Chrome::Part::None && part != Chrome::Part::Caption)
@@ -1985,7 +2054,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             // viewport, the gizmo within it. (Min/Max/Close hover is tracked
             // separately via WM_NCMOUSEMOVE, since those points are always
             // non-client.)
-            if (movePoint.y < EffectiveToolbarHeight(*app))
+            if (movePoint.y < app->toolbarHeight)
             {
                 const Chrome::Part hit = app->chrome.HitTest(movePoint);
                 const Chrome::Part effective = hit == Chrome::Part::Caption ? Chrome::Part::None : hit;
@@ -2132,7 +2201,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             app->chrome.pressed = Chrome::Part::None;
             if (GetCapture() == window) ReleaseCapture();
             InvalidateRect(window, nullptr, FALSE);
-            if (upPoint.y < EffectiveToolbarHeight(*app) && app->chrome.HitTest(upPoint) == pressedPart)
+            if (upPoint.y < app->toolbarHeight && app->chrome.HitTest(upPoint) == pressedPart)
             {
                 HandleChromeAction(*app, pressedPart);
             }

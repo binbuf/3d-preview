@@ -21,7 +21,8 @@ bool PtInRectValue(const RECT& rect, POINT point)
 }
 }
 
-void Chrome::UpdateLayout(int clientWidth, int titleBarHeight, float dpiScale, bool hasModel, bool isMaximized)
+void Chrome::UpdateLayout(int clientWidth, int titleBarHeight, float dpiScale, bool hasModel, bool isMaximized,
+    bool isFullscreen)
 {
     titleBarRect_ = RECT{ 0, 0, clientWidth, titleBarHeight };
     isMaximized_ = isMaximized;
@@ -35,23 +36,31 @@ void Chrome::UpdateLayout(int clientWidth, int titleBarHeight, float dpiScale, b
     // System caption buttons: rightmost, full title-bar height (matches the
     // real caption buttons' hit target so DWM's Snap Layout hover flyout on
     // Maximize feels native). `isMaximized` only affects the drawn glyph
-    // (Renderer::DrawTitleBar), not this layout. Always visible/enabled —
-    // even while a model is still loading — so the window can always be
-    // minimized, maximized, and closed.
+    // (Renderer::DrawTitleBar), not this layout. Visible/enabled regardless
+    // of whether a model is loaded — so the window can always be minimized,
+    // maximized, and closed — except in Fullscreen, where the topmost,
+    // monitor-filling window has nothing for them to do (no border to snap,
+    // no taskbar entry to restore to by dragging) and they'd just clutter
+    // the floating toolbar; Preview3D.cpp's bottom-bar Fullscreen toggle is
+    // the way out instead. Reserving their layout space either way (rather
+    // than reclaiming it) keeps the action-button group's position stable
+    // across the Fullscreen toggle.
     int right = clientWidth;
     close_.rect = MakeRect(right - sysButtonWidth, 0, sysButtonWidth, titleBarHeight); right -= sysButtonWidth;
     maximize_.rect = MakeRect(right - sysButtonWidth, 0, sysButtonWidth, titleBarHeight); right -= sysButtonWidth;
     minimize_.rect = MakeRect(right - sysButtonWidth, 0, sysButtonWidth, titleBarHeight); right -= sysButtonWidth;
-    close_.enabled = close_.visible = true;
-    maximize_.enabled = maximize_.visible = true;
-    minimize_.enabled = minimize_.visible = true;
+    close_.enabled = close_.visible = !isFullscreen;
+    maximize_.enabled = maximize_.visible = !isFullscreen;
+    minimize_.enabled = minimize_.visible = !isFullscreen;
 
     right -= margin;
 
     // Right-anchored group: Open With, just left of the caption buttons.
+    // Also hidden in Fullscreen — opening a different app to handle the file
+    // would leave the topmost fullscreen window stranded above it.
     const int openWithWidth = Scale(72, dpiScale);
     openWith_.rect = MakeRect(right - openWithWidth, actionY, openWithWidth, actionHeight); right -= openWithWidth;
-    openWith_.enabled = openWith_.visible = hasModel;
+    openWith_.enabled = openWith_.visible = hasModel && !isFullscreen;
 
     const int rightGroupStart = right - margin;
 
@@ -72,8 +81,6 @@ void Chrome::UpdateLayout(int clientWidth, int titleBarHeight, float dpiScale, b
         left += entry.width + actionGap;
         entry.state->enabled = entry.state->visible = hasModel;
     }
-    // Controls/warnings/About don't need a model loaded.
-    overflow_.enabled = overflow_.visible = true;
 
     const int leftGroupEnd = left - actionGap + margin;
     filenameRect_ = RECT{ std::min(leftGroupEnd, rightGroupStart), 0, std::max(leftGroupEnd, rightGroupStart), titleBarHeight };

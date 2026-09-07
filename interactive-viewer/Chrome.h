@@ -46,9 +46,12 @@ public:
 
     // Recomputes every button rect for the current client width and DPI.
     // `hasModel` hides the navigation-only buttons (Grid/Snap/Speed/Fit/Reset/
-    // Share) the same way the old toolbar disabled them with nothing loaded;
-    // Overflow stays available regardless (Controls/About don't need a model).
-    void UpdateLayout(int clientWidth, int titleBarHeight, float dpiScale, bool hasModel, bool isMaximized);
+    // Share/Overflow) the same way the old toolbar disabled them with nothing
+    // loaded. `isFullscreen` additionally hides Minimize/Maximize/Close/Open
+    // With, which don't apply to the topmost, monitor-filling window the
+    // floating toolbar overlays there (see Preview3D.cpp's ToggleFullscreen).
+    void UpdateLayout(int clientWidth, int titleBarHeight, float dpiScale, bool hasModel, bool isMaximized,
+        bool isFullscreen);
 
     // Hit-tests a CLIENT-coordinate point (already converted from screen
     // coordinates by the caller) against every button, falling back to
