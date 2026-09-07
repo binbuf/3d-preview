@@ -1051,9 +1051,17 @@ void RenderScene(ViewerApp& app)
     app.renderer.Render(app.camera, overlay, app.gizmo);
 }
 
-void RenderFrame(ViewerApp& app)
+// Advances the camera by the wall-clock time since the last tick, from
+// whichever source last ticked it (a rendered frame, or a raw mouse sample
+// during fly-look — see WM_INPUT). Called once per raw mouse sample rather
+// than only once per rendered frame, so WASD translation is integrated in
+// step with every look update instead of catching up in one coarse jump per
+// paint, which is what made turning while flying look faceted/blocky: mice
+// report well above the display's refresh rate, so several look updates
+// could land between two paints, all summed into a single end-of-frame
+// rotation that translation then followed as one straight chord.
+void TickCamera(ViewerApp& app)
 {
-    if (!app.rendererReady) return;
     const double now = NowSeconds();
     double elapsed = 0.0;
     if (app.lastFrameSeconds > 0.0)
@@ -1064,6 +1072,12 @@ void RenderFrame(ViewerApp& app)
     app.lastFrameSeconds = now;
     app.camera.SetInput(BuildFlightInput(app));
     app.camera.Update(elapsed);
+}
+
+void RenderFrame(ViewerApp& app)
+{
+    if (!app.rendererReady) return;
+    TickCamera(app);
     RenderScene(app);
     ValidateRect(app.window, nullptr);
 }
@@ -1491,7 +1505,17 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                     raw.header.dwType == RIM_TYPEMOUSE && (raw.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 &&
                     (raw.data.mouse.lLastX != 0 || raw.data.mouse.lLastY != 0))
                 {
-                    app->camera.Look(static_cast<float>(raw.data.mouse.lLastX), static_cast<float>(raw.data.mouse.lLastY));
+                    // Tick the camera right here, once per raw mouse sample,
+                    // instead of only once per rendered frame: mice report at
+                    // 125-1000Hz, well above the display refresh rate, so a
+                    // render-paced tick would sum up several look updates and
+                    // then move WASD translation through only their *final*
+                    // orientation — a coarse, faceted approximation of the
+                    // turn. Ticking per sample advances rotation and
+                    // translation together at the same fine granularity, so
+                    // flight curves smoothly like Unreal's.
+                    app->camera.AccumulateLook(static_cast<float>(raw.data.mouse.lLastX), static_cast<float>(raw.data.mouse.lLastY));
+                    TickCamera(*app);
                     InvalidateRect(window, nullptr, FALSE);
                 }
             }

@@ -121,6 +121,11 @@ struct Camera
     double lastViewportHeight = 0.0;
     double flySpeedScale = 1.0;
     FlightInput input{};
+    // Raw mouse-look deltas queued by WM_INPUT since the last Update(), so
+    // look and WASD translation are integrated together on the same tick
+    // instead of look snapping ahead of movement (see AccumulateLook).
+    double pendingLookX = 0.0;
+    double pendingLookY = 0.0;
 
     void SetBounds(const DirectX::XMFLOAT3& minimum, const DirectX::XMFLOAT3& maximum, float aspect);
     void Fit(float aspect);
@@ -129,6 +134,11 @@ struct Camera
     void Reset(float aspect);
     void Orbit(float deltaX, float deltaY);
     void Look(float deltaX, float deltaY);
+    // Queues a raw mouse-look delta to be applied on the next Update() tick,
+    // rather than immediately, so a burst of WM_INPUT messages during a
+    // fly-look drag rotates the camera in step with WASD translation instead
+    // of ahead of it (which otherwise produces a blocky, chorded flight path).
+    void AccumulateLook(float deltaX, float deltaY);
     void Pan(float deltaX, float deltaY, float viewportHeight);
     // Trucks along the world ground plane (flattened forward/right), optionally
     // snapped to the nearest world axis. Used by the MMB drag and Shift+arrows.

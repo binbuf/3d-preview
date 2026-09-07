@@ -324,6 +324,12 @@ void Camera::Look(float deltaX, float deltaY)
     XMStoreFloat4(&orientation, current);
 }
 
+void Camera::AccumulateLook(float deltaX, float deltaY)
+{
+    pendingLookX += deltaX;
+    pendingLookY += deltaY;
+}
+
 void Camera::ShiftPivot(double x, double y, double z)
 {
     targetX += x;
@@ -481,6 +487,16 @@ double Camera::FlightSpeed() const
 
 void Camera::Update(double deltaTime)
 {
+    // Apply any queued raw mouse-look first, so this tick's WASD translation
+    // (below) moves along the orientation the player is looking at *now*
+    // rather than the stale one from before this frame's mouse deltas.
+    if (pendingLookX != 0.0 || pendingLookY != 0.0)
+    {
+        Look(static_cast<float>(pendingLookX), static_cast<float>(pendingLookY));
+        pendingLookX = 0.0;
+        pendingLookY = 0.0;
+    }
+
     const double flightEase = EaseFactor(deltaTime, kFlightAccelSeconds);
 
     // Smoothed keyboard flight: velocity eases toward the intent instead of
@@ -628,6 +644,7 @@ void Camera::Update(double deltaTime)
 
 bool Camera::HasMotion() const
 {
+    if (pendingLookX != 0.0 || pendingLookY != 0.0) return true;
     if (velRight != 0.0 || velUp != 0.0 || velForward != 0.0) return true;
     if (rollRate != 0.0) return true;
     if (orbitRateX != 0.0 || orbitRateY != 0.0) return true;
