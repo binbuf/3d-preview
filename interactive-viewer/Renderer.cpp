@@ -937,8 +937,9 @@ struct Renderer::Impl
     }
 
     // Photos-style bottom bar: a bar strip matching the title bar's fill,
-    // with a zoom-percent readout on the right of the (separately
-    // HWND-hosted) zoom slider. Only drawn while a model is loaded — see
+    // with a D2D-drawn zoom slider (ZoomTrackRect, Preview3D.cpp — same
+    // split as the Speed flyout track) docked bottom-right next to the
+    // zoom-percent readout. Only drawn while a model is loaded — see
     // OverlayInfo::bottomBarHeight, which the app zeroes out otherwise.
     void DrawBottomBar(const OverlayInfo& overlay, float clientWidth, float clientHeight, float scale)
     {
@@ -956,6 +957,16 @@ struct Renderer::Impl
         DrawText(percentText, smallFormat.Get(),
             D2D1::RectF(contentRight - margin - labelWidth, barTop, contentRight - margin, clientHeight),
             D2D1::ColorF(0xA1A1A6), DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+        const D2D1_RECT_F track = ToRectF(overlay.zoomTrackRect);
+        const float trackY = (track.top + track.bottom) * 0.5f;
+        SetBrush(D2D1::ColorF(0x48484C));
+        overlayTarget->DrawLine(D2D1::Point2F(track.left, trackY), D2D1::Point2F(track.right, trackY), brush.Get(), Scale(3, scale));
+        const float thumbX = track.left + (track.right - track.left) * std::clamp(overlay.zoomSliderT, 0.0f, 1.0f);
+        SetBrush(D2D1::ColorF(0x0A84FF));
+        overlayTarget->DrawLine(D2D1::Point2F(track.left, trackY), D2D1::Point2F(thumbX, trackY), brush.Get(), Scale(3, scale));
+        SetBrush(D2D1::ColorF(0xF5F5F7));
+        overlayTarget->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumbX, trackY), Scale(7, scale), Scale(7, scale)), brush.Get());
     }
 
     // Right-docked, read-only "Stats & Shading" panel — see InfoPanel.h for
@@ -1243,19 +1254,6 @@ struct Renderer::Impl
                 static_cast<float>(cardPixels.bottom) - Scale(70, scale)), secondaryText);
             DrawText(L"GLB  •  opening", smallFormat.Get(), D2D1::RectF(left, static_cast<float>(cardPixels.bottom) - Scale(101, scale),
                 right, static_cast<float>(cardPixels.bottom) - Scale(76, scale)), D2D1::ColorF(0x777F8B));
-        }
-
-        if (!overlay.status.empty() && (overlay.state == ViewerState::Ready || (overlay.state == ViewerState::Loading && overlay.hasModel)))
-        {
-            const float margin = Scale(14, scale);
-            const float pillHeight = Scale(30, scale);
-            const float pillWidth = std::min(contentRight - margin * 2, Scale(350, scale));
-            const D2D1_ROUNDED_RECT pill = D2D1::RoundedRect(D2D1::RectF(margin, contentBottom - margin - pillHeight,
-                margin + pillWidth, contentBottom - margin), pillHeight * 0.5f, pillHeight * 0.5f);
-            SetBrush(D2D1::ColorF(0x111318, 0.82f));
-            overlayTarget->FillRoundedRectangle(pill, brush.Get());
-            DrawText(overlay.status, smallFormat.Get(), D2D1::RectF(margin + Scale(12, scale), contentBottom - margin - pillHeight,
-                margin + pillWidth - Scale(10, scale), contentBottom - margin - Scale(1, scale)), secondaryText);
         }
 
         if (!overlay.warning.empty() && overlay.state == ViewerState::Ready)

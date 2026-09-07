@@ -33,7 +33,6 @@ struct OverlayInfo
 {
     ViewerState state = ViewerState::Empty;
     std::wstring filename;
-    std::wstring status;
     std::wstring errorSummary;
     std::wstring errorDetails;
     std::wstring warning;
@@ -44,6 +43,8 @@ struct OverlayInfo
     int infoPanelWidth = 0;   // 0 when the Information panel is closed
     std::vector<InfoPanelSection> infoPanelSections;   // only meaningful while infoPanelWidth > 0
     float zoomPercent = 100.0f;   // 100 == the default Fit framing distance
+    RECT zoomTrackRect{};         // client px, the D2D-drawn zoom slider's track, valid while bottomBarHeight > 0
+    float zoomSliderT = 0.0f;     // 0..1 normalized zoom-slider thumb position
     bool hasModel = false;
     bool gridVisible = true;
     bool axisSnapEnabled = false;

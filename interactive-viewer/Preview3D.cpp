@@ -72,7 +72,6 @@ struct ViewerApp
 {
     HINSTANCE instance = nullptr;
     HWND window = nullptr;
-    HWND zoomSlider = nullptr;
     HWND retryButton = nullptr;
     HWND openAnotherButton = nullptr;
     HWND copyButton = nullptr;
@@ -85,6 +84,7 @@ struct ViewerApp
     bool infoPanelVisible = false;
     bool speedFlyoutOpen = false;
     bool speedSliderDragging = false;
+    bool zoomSliderDragging = false;
     bool rendererReady = false;
     bool closing = false;
     Renderer renderer;
@@ -126,8 +126,6 @@ struct ViewerApp
     std::wstring currentPath;
     std::wstring failedPath;
     std::wstring filename;
-    std::wstring status;
-    std::wstring readyStatus;
     std::wstring warning;
     std::wstring errorSummary;
     std::wstring errorDetails;
@@ -239,16 +237,6 @@ bool HasGlbExtension(const std::wstring& path)
     std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t value)
         { return static_cast<wchar_t>(std::towlower(value)); });
     return extension == L".glb";
-}
-
-std::wstring FormatCount(std::uint64_t value)
-{
-    std::wstring text = std::to_wstring(value);
-    for (std::ptrdiff_t index = static_cast<std::ptrdiff_t>(text.size()) - 3; index > 0; index -= 3)
-    {
-        text.insert(static_cast<std::size_t>(index), 1, L',');
-    }
-    return text;
 }
 
 std::wstring FormatMultiplier(double value)
@@ -547,12 +535,10 @@ void ClickSelect(ViewerApp& app, const POINT& point)
     if (hit && !app.meshSelected)
     {
         app.meshSelected = true;
-        app.status = L"Mesh selected — F frames the selection, click the background to clear";
     }
     else if (!hit && app.meshSelected)
     {
         app.meshSelected = false;
-        app.status = app.readyStatus;
     }
     InvalidateRect(app.window, nullptr, FALSE);
 }
@@ -634,17 +620,43 @@ double ZoomDistanceForSliderPosition(const Camera& camera, int position)
     return maxDistance * std::pow(minDistance / maxDistance, t);
 }
 
-// Only called after an explicit, instantaneous change (model load, Fit,
-// Reset, wheel dolly) — never every frame during an eased glide, so it never
-// fights a live drag on the slider itself.
-void SyncZoomSlider(ViewerApp& app)
-{
-    if (app.zoomSlider) SendMessageW(app.zoomSlider, TBM_SETPOS, TRUE, ZoomSliderPositionFor(app.camera));
-}
-
 float ZoomPercentFor(const Camera& camera)
 {
     return static_cast<float>(100.0 * camera.homeDistance / std::max(1e-6, camera.distance));
+}
+
+// Compact zoom slider, docked in the bottom-right of the bottom bar just
+// left of the D2D-drawn percent readout (DrawBottomBar's margin/labelWidth,
+// Renderer.cpp — mirrored here so the two rects never drift apart). Shared
+// by drawing (RenderScene) and input handling (WM_LBUTTONDOWN/MOUSEMOVE),
+// the same split as the Speed flyout track above.
+RECT ZoomTrackRect(const ViewerApp& app)
+{
+    RECT client{};
+    GetClientRect(app.window, &client);
+    const int contentRight = client.right - InfoPanelWidthPixels(app);
+    const int margin = Scale(app, 14);
+    const int percentLabelWidth = Scale(app, 56);
+    const int trackWidth = Scale(app, 110);
+    const int gap = Scale(app, 14);
+    const int right = contentRight - margin - percentLabelWidth - gap;
+    const int left = right - trackWidth;
+    const int barY = client.bottom - app.bottomBarHeight;
+    const int centerY = barY + app.bottomBarHeight / 2;
+    const int halfHeight = Scale(app, 8);
+    return RECT{ left, centerY - halfHeight, right, centerY + halfHeight };
+}
+
+// Direct manipulation: sets distance immediately (no easing), so the view
+// tracks the thumb 1:1 while dragging, unlike wheel zoom which eases toward
+// targetDistance.
+void SetZoomFromTrackX(ViewerApp& app, int clientX)
+{
+    const RECT track = ZoomTrackRect(app);
+    const float t = std::clamp(static_cast<float>(clientX - track.left) / static_cast<float>(std::max(1L, track.right - track.left)), 0.0f, 1.0f);
+    const double distance = ZoomDistanceForSliderPosition(app.camera, static_cast<int>(std::lround(t * kZoomSliderMax)));
+    app.camera.distance = distance;
+    app.camera.targetDistance = distance;
 }
 
 // Guards toggle commands against keyboard auto-repeat: holding a key must not
@@ -705,9 +717,6 @@ void SetControlVisible(HWND control, bool visible)
 
 void UpdateButtonAvailability(ViewerApp& app)
 {
-    const BOOL hasModel = app.renderer.HasModel() ? TRUE : FALSE;
-    EnableWindow(app.zoomSlider, hasModel);
-    SetControlVisible(app.zoomSlider, hasModel != FALSE);
     SetControlVisible(app.retryButton, app.state == ViewerState::Failed);
     SetControlVisible(app.openAnotherButton, app.state == ViewerState::Failed);
     SetControlVisible(app.copyButton, app.state == ViewerState::Failed);
@@ -719,21 +728,6 @@ void LayoutControls(ViewerApp& app)
     if (!app.window) return;
     RECT client{};
     GetClientRect(app.window, &client);
-    const int margin = Scale(app, 9);
-
-    // Photos-style bottom bar: a zoom slider spanning most of the width,
-    // leaving room on the right for the D2D-drawn zoom-percent readout
-    // (DrawBottomBar, Renderer.cpp) and a matching margin on the left.
-    if (app.zoomSlider)
-    {
-        const int barY = client.bottom - app.bottomBarHeight;
-        const int sliderHeight = Scale(app, 24);
-        const int sliderY = barY + (app.bottomBarHeight - sliderHeight) / 2;
-        const int percentReserve = Scale(app, 84);
-        const int sliderRight = client.right - InfoPanelWidthPixels(app) - margin - percentReserve;
-        MoveWindow(app.zoomSlider, margin, sliderY, std::max(0, sliderRight - margin), sliderHeight, TRUE);
-    }
-
     const RECT card = CalculateErrorCardRect(client.right, client.bottom, app.toolbarHeight, app.dpiScale);
     const int actionHeight = Scale(app, 32);
     const int actionGap = Scale(app, 8);
@@ -791,13 +785,10 @@ void CreateControls(ViewerApp& app)
     // Fit/Reset/Grid/Snap/Speed/Info/Share/Overflow/Open-With and the system
     // min/max/close now live in the D2D-drawn title bar (Chrome +
     // Renderer::DrawTitleBar) instead of as owner-drawn child buttons — see
-    // the WM_NCHITTEST/WM_LBUTTONDOWN handling in WindowProcedure. Only the
-    // bottom-bar zoom slider and the error-state action buttons remain real
-    // HWND controls.
-    app.zoomSlider = CreateWindowExW(0, L"msctls_trackbar32", L"", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-        0, 0, 10, 10, app.window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_VIEW_ZOOM_SLIDER)), app.instance, nullptr);
-    SendMessageW(app.zoomSlider, TBM_SETRANGE, TRUE, MAKELONG(0, kZoomSliderMax));
-    SyncZoomSlider(app);
+    // the WM_NCHITTEST/WM_LBUTTONDOWN handling in WindowProcedure. The zoom
+    // slider is D2D-drawn too (ZoomTrackRect/DrawBottomBar) with its own
+    // pointer handling, same split as the Speed flyout. Only the
+    // error-state action buttons remain real HWND controls.
     app.retryButton = CreateButton(app, ID_VIEW_RETRY, L"Retry");
     app.openAnotherButton = CreateButton(app, ID_VIEW_OPEN_ANOTHER, L"Open another");
     app.copyButton = CreateButton(app, ID_VIEW_COPY_DETAILS, L"Copy details");
@@ -805,7 +796,6 @@ void CreateControls(ViewerApp& app)
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, app.window, nullptr, app.instance, nullptr);
     SetWindowPos(app.tooltip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     SendMessageW(app.tooltip, TTM_SETMAXTIPWIDTH, 0, Scale(app, 360));
-    AddTooltip(app, app.zoomSlider, L"Zoom (same as scroll-wheel or Ctrl+middle drag)");
     AddTooltip(app, app.retryButton, L"Try opening this file again");
     AddTooltip(app, app.openAnotherButton, L"Choose a different GLB model");
     AddTooltip(app, app.copyButton, L"Copy technical error details without the file path");
@@ -821,7 +811,6 @@ void SetFailure(ViewerApp& app, const std::wstring& summary, const std::wstring&
     app.errorSummary = summary;
     app.errorDetails = details;
     app.failedPath = failedPath;
-    app.status.clear();
     StopNavigation(app);
     EndPointer(app);
     UpdateButtonAvailability(app);
@@ -838,7 +827,6 @@ void CancelOpen(ViewerApp& app)
     app.state = app.renderer.HasModel() ? ViewerState::Ready : ViewerState::Empty;
     if (app.renderer.HasModel()) app.filename = FileNameFromPath(app.currentPath);
     else app.filename.clear();
-    app.status = app.renderer.HasModel() ? app.readyStatus : L"";
     UpdateTitle(app);
     UpdateButtonAvailability(app);
     LayoutControls(app);
@@ -884,7 +872,6 @@ void BeginOpen(ViewerApp& app, const std::wstring& path)
     app.errorSummary.clear();
     app.errorDetails.clear();
     app.filename = FileNameFromPath(path);
-    app.status.clear();
     app.warning.clear();
     UpdateTitle(app);
     UpdateButtonAvailability(app);
@@ -1077,12 +1064,11 @@ void HandleCommand(ViewerApp& app, int id)
     {
     case ID_VIEW_OPEN:
     case ID_VIEW_OPEN_ANOTHER: OpenDialog(app); break;
-    case ID_VIEW_FIT: FrameSelectedOrAll(app); SyncZoomSlider(app); break;
+    case ID_VIEW_FIT: FrameSelectedOrAll(app); break;
     case ID_VIEW_RESET:
         if (app.renderer.HasModel())
         {
             app.camera.Reset(ViewportAspect(app));
-            SyncZoomSlider(app);
             InvalidateRect(app.window, nullptr, FALSE);
         }
         break;
@@ -1226,7 +1212,6 @@ void RenderScene(ViewerApp& app)
     OverlayInfo overlay;
     overlay.state = app.state;
     overlay.filename = app.filename;
-    overlay.status = app.status;
     overlay.errorSummary = app.errorSummary;
     overlay.errorDetails = app.errorDetails;
     overlay.warning = app.warning;
@@ -1238,9 +1223,15 @@ void RenderScene(ViewerApp& app)
     if (overlay.infoPanelWidth > 0 && app.loadedModel)
     {
         overlay.infoPanelSections = BuildInfoPanelSections(
-            app.loadedModel->stats, app.loadedModel->triangleCount, app.loadedModel->vertices.size());
+            app.loadedModel->stats, app.loadedModel->triangleCount, app.loadedModel->vertices.size(),
+            app.loadedModel->boundsMin, app.loadedModel->boundsMax);
     }
     overlay.zoomPercent = ZoomPercentFor(app.camera);
+    if (overlay.bottomBarHeight > 0)
+    {
+        overlay.zoomTrackRect = ZoomTrackRect(app);
+        overlay.zoomSliderT = static_cast<float>(ZoomSliderPositionFor(app.camera)) / kZoomSliderMax;
+    }
     overlay.hasModel = app.renderer.HasModel();
     overlay.gridVisible = app.gridVisible;
     overlay.axisSnapEnabled = app.axisSnapEnabled;
@@ -1467,19 +1458,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_DRAWITEM:
         DrawOwnerButton(*app, *reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
         return TRUE;
-    case WM_HSCROLL:
-        if (reinterpret_cast<HWND>(lParam) == app->zoomSlider && CanNavigate(*app))
-        {
-            // Direct manipulation: set distance immediately (no easing), so
-            // the view tracks the thumb 1:1 while dragging, unlike wheel
-            // zoom which eases toward targetDistance.
-            const int position = static_cast<int>(SendMessageW(app->zoomSlider, TBM_GETPOS, 0, 0));
-            const double distance = ZoomDistanceForSliderPosition(app->camera, position);
-            app->camera.distance = distance;
-            app->camera.targetDistance = distance;
-            InvalidateRect(window, nullptr, FALSE);
-        }
-        return 0;
     case WM_ERASEBKGND:
         return TRUE;
     case WM_PAINT:
@@ -1680,6 +1658,19 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
                 return 0;
             }
         }
+        if (CanNavigate(*app))
+        {
+            RECT hitTrack = ZoomTrackRect(*app);
+            InflateRect(&hitTrack, 0, Scale(*app, 8));
+            if (PtInRect(&hitTrack, downPoint))
+            {
+                SetCapture(window);
+                app->zoomSliderDragging = true;
+                SetZoomFromTrackX(*app, downPoint.x);
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+        }
         if (PointInViewport(*app, POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) }) && CanNavigate(*app))
         {
             SetFocus(window);
@@ -1760,6 +1751,12 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         if (app->speedSliderDragging)
         {
             if (GetCapture() == window) SetFlySpeedFromFlyoutX(*app, movePoint.x);
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+        if (app->zoomSliderDragging)
+        {
+            if (GetCapture() == window) SetZoomFromTrackX(*app, movePoint.x);
             InvalidateRect(window, nullptr, FALSE);
             return 0;
         }
@@ -1869,6 +1866,12 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             if (GetCapture() == window) ReleaseCapture();
             return 0;
         }
+        if (app->zoomSliderDragging)
+        {
+            app->zoomSliderDragging = false;
+            if (GetCapture() == window) ReleaseCapture();
+            return 0;
+        }
         if (app->chrome.pressed != Chrome::Part::None)
         {
             const POINT upPoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -1913,7 +1916,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         if (PointInViewport(*app, POINT{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) }) && CanNavigate(*app))
         {
             FrameSelectedOrAll(*app);
-            SyncZoomSlider(*app);
         }
         return 0;
     case WM_MOUSEWHEEL:
@@ -1924,7 +1926,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             else
             {
                 app->camera.Dolly(steps);
-                SyncZoomSlider(*app);
                 InvalidateRect(window, nullptr, FALSE);
             }
         }
@@ -1964,7 +1965,6 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         if (wParam == VK_OEM_PLUS || wParam == VK_ADD) app->camera.Dolly(1.0f);
         else if (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT) app->camera.Dolly(-1.0f);
         else break;
-        SyncZoomSlider(*app);
         InvalidateRect(window, nullptr, FALSE);
         return 0;
     case WM_KEYUP:
@@ -2007,11 +2007,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             app->warning = complete->result.model->warning;
             app->loadedModel = complete->result.model;
             app->meshSelected = false;
-            app->readyStatus = FormatCount(complete->result.model->triangleCount) +
-                L" triangles  •  LMB orbit · MMB truck · RMB+WASD fly";
-            app->status = app->readyStatus;
             app->camera.SetBounds(complete->result.model->boundsMin, complete->result.model->boundsMax, ViewportAspect(*app));
-            SyncZoomSlider(*app);
             app->state = ViewerState::Ready;
             app->failedPath.clear();
             app->errorSummary.clear();

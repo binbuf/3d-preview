@@ -2,6 +2,8 @@
 #include "InfoPanel.h"
 
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 
 namespace
 {
@@ -32,12 +34,27 @@ std::wstring TextureSlotValue(int textureCount, bool hasConstantFactor)
     if (hasConstantFactor) return L"Constant";
     return L"No";
 }
+
+std::wstring FormatMeters(float value)
+{
+    std::wostringstream text;
+    text << std::fixed << std::setprecision(3) << value << L" m";
+    return text.str();
+}
 }
 
 std::vector<InfoPanelSection> BuildInfoPanelSections(
-    const ModelStats& stats, std::uint64_t triangleCount, std::uint64_t vertexCount)
+    const ModelStats& stats, std::uint64_t triangleCount, std::uint64_t vertexCount,
+    const DirectX::XMFLOAT3& boundsMin, const DirectX::XMFLOAT3& boundsMax)
 {
     std::vector<InfoPanelSection> sections;
+
+    sections.push_back({ L"Dimensions",
+        {
+            { L"Width (X)", FormatMeters(boundsMax.x - boundsMin.x) },
+            { L"Height (Y)", FormatMeters(boundsMax.y - boundsMin.y) },
+            { L"Depth (Z)", FormatMeters(boundsMax.z - boundsMin.z) },
+        } });
 
     sections.push_back({ L"Mesh Data",
         {

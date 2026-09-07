@@ -27,8 +27,11 @@ struct InfoPanelSection
 // ModelStats, Model.h). Fields the current GLB-only slice cannot populate
 // (texture/animation data on a model that has none) still get a row, reading
 // "0" or "No" rather than being omitted, so the panel's shape is stable.
+// `boundsMin`/`boundsMax` are the model's world-space AABB (Model.h,
+// ModelData::boundsMin/boundsMax), reported in glTF's implied meters.
 std::vector<InfoPanelSection> BuildInfoPanelSections(
-    const ModelStats& stats, std::uint64_t triangleCount, std::uint64_t vertexCount);
+    const ModelStats& stats, std::uint64_t triangleCount, std::uint64_t vertexCount,
+    const DirectX::XMFLOAT3& boundsMin, const DirectX::XMFLOAT3& boundsMax);
 
 // Fixed-width panel docked to the right edge of the viewport, below the title
 // bar and above the bottom bar.
