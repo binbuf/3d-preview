@@ -24,6 +24,13 @@
 #define ID_VIEW_CONTROLS        32779
 #define ID_VIEW_OPEN_INITIAL    32780
 #define ID_VIEW_DIAGNOSTICS     32781
+#define ID_VIEW_GRID            32782
+#define ID_VIEW_FRONT           32783
+#define ID_VIEW_RIGHT           32784
+#define ID_VIEW_TOP             32785
+#define ID_VIEW_PROJECTION      32786
+#define ID_VIEW_AXIS_SNAP       32787
+#define ID_VIEW_SPEED_SLIDER    32788
 #ifndef IDC_STATIC
 #define IDC_STATIC				-1
 #endif
@@ -34,7 +41,7 @@
 
 #define _APS_NO_MFC					130
 #define _APS_NEXT_RESOURCE_VALUE	129
-#define _APS_NEXT_COMMAND_VALUE		32782
+#define _APS_NEXT_COMMAND_VALUE		32789
 #define _APS_NEXT_CONTROL_VALUE		1000
 #define _APS_NEXT_SYMED_VALUE		110
 #endif

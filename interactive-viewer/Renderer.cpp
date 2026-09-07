@@ -17,8 +17,6 @@ using namespace DirectX;
 
 namespace
 {
-constexpr float kVerticalFieldOfView = XM_PIDIV4;
-
 float Scale(float value, float dpiScale)
 {
     return std::round(value * dpiScale);
@@ -65,6 +63,7 @@ cbuffer Frame : register(b0)
 {
     row_major float4x4 viewProjection;
     float4 cameraPosition;
+    float4 options;
 };
 
 struct VertexInput
@@ -98,6 +97,7 @@ cbuffer Frame : register(b0)
 {
     row_major float4x4 viewProjection;
     float4 cameraPosition;
+    float4 options;
 };
 
 struct PixelInput
@@ -119,6 +119,9 @@ float4 main(PixelInput input) : SV_TARGET
     float hemisphere = lerp(0.18, 0.42, normal.y * 0.5 + 0.5);
     float rim = pow(1.0 - saturate(dot(normal, viewDirection)), 3.0) * 0.12;
     float3 lit = input.color.rgb * (hemisphere + keyLight * 0.72 + fillLight * 0.18) + rim;
+    // Mesh-selection highlight: a cool fresnel lift driven by options.x.
+    float outline = pow(1.0 - saturate(dot(normal, viewDirection)), 2.0);
+    lit += options.x * (outline * 0.45 * float3(0.36, 0.62, 1.0) + 0.03);
     return float4(lit, input.color.a);
 }
 )";
@@ -127,22 +130,34 @@ struct FrameConstants
 {
     XMFLOAT4X4 viewProjection{};
     XMFLOAT4 cameraPosition{};
+    XMFLOAT4 options{};
 };
 }
 
 namespace
 {
 constexpr float kOrbitPixelsToRadians = 0.008f;
+constexpr float kLookPixelsToRadians = 0.006f;
 constexpr double kFlightAccelSeconds = 0.13;
 constexpr double kRollAccelSeconds = 0.10;
 constexpr double kRollBaseSpeed = 1.2;
-constexpr double kBoostMultiplier = 5.0;
+constexpr double kBoostMultiplier = 2.0;
 constexpr double kInertiaDecaySeconds = 0.5;
 constexpr double kInertiaMinPixelsPerSecond = 12.0;
 constexpr double kInertiaMaxPixelsPerSecond = 420.0;
 constexpr double kZoomEaseSeconds = 0.09;
 constexpr double kPivotAnimSeconds = 0.5;
 constexpr double kOrientationAnimSeconds = 0.55;
+// Perspective/orthographic cross-fade duration.
+constexpr double kProjectionBlendSeconds = 0.16;
+// Ctrl+MMB drag: log-distance change per dragged pixel.
+constexpr double kDollyDragPerPixel = 0.0045;
+// Orbit and look pitch clamp: |forward . worldUp| may not exceed this, which
+// keeps the turntable and freelook from crossing the up-axis pole and
+// flipping the horizon. Yaw is never restricted.
+constexpr float kPitchPoleLimit = 0.99998f;
+constexpr double kFlySpeedMin = 0.05;
+constexpr double kFlySpeedMax = 40.0;
 
 double EaseFactor(double deltaSeconds, double tau)
 {
@@ -172,8 +187,11 @@ void Camera::SetBounds(const XMFLOAT3& minimum, const XMFLOAT3& maximum, float a
     homeOrientation = DefaultOrientation();
     orientation = homeOrientation;
     desiredOrientation = homeOrientation;
+    homeBoundsMin = minimum;
+    homeBoundsMax = maximum;
     distance = FitDistance(aspect);
     targetDistance = distance;
+    homeDistance = distance;  // cached default framing for Reset View
     pivotAnimating = false;
     orientationAnimating = false;
     StopMotion();
@@ -190,10 +208,23 @@ double Camera::FitDistance(float aspect) const
 
 void Camera::Fit(float aspect)
 {
-    targetDistance = FitDistance(aspect);
-    desiredX = homeX;
-    desiredY = homeY;
-    desiredZ = homeZ;
+    FrameBox(homeBoundsMin, homeBoundsMax, aspect);
+}
+
+void Camera::FrameBox(const XMFLOAT3& minimum, const XMFLOAT3& maximum, float aspect)
+{
+    desiredX = (static_cast<double>(minimum.x) + maximum.x) * 0.5;
+    desiredY = (static_cast<double>(minimum.y) + maximum.y) * 0.5;
+    desiredZ = (static_cast<double>(minimum.z) + maximum.z) * 0.5;
+    const double extentX = static_cast<double>(maximum.x) - minimum.x;
+    const double extentY = static_cast<double>(maximum.y) - minimum.y;
+    const double extentZ = static_cast<double>(maximum.z) - minimum.z;
+    const double radius = std::max(0.0001, std::sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ) * 0.5);
+    const double vertical = kVerticalFieldOfView;
+    const double horizontal = 2.0 * std::atan(std::tan(vertical * 0.5) * std::max(0.1f, aspect));
+    const double limiting = std::min(vertical, horizontal);
+    targetDistance = std::clamp(radius / std::max(0.05, std::sin(limiting * 0.5)) / 0.93,
+        radius * 0.05, radius * 250.0);
     pivotFromX = targetX;
     pivotFromY = targetY;
     pivotFromZ = targetZ;
@@ -209,16 +240,50 @@ void Camera::Reset(float aspect)
     orientationFrom = orientation;
     orientationAnimElapsed = 0.0;
     orientationAnimating = true;
+    // Reset also restores the cached default projection mode.
+    SetProjection(ProjectionMode::Perspective);
+}
+
+void Camera::SnapToView(XMVECTOR viewOrientation)
+{
+    XMStoreFloat4(&desiredOrientation, XMQuaternionNormalize(viewOrientation));
+    orientationFrom = orientation;
+    orientationAnimElapsed = 0.0;
+    orientationAnimating = true;
+    CancelInertia();
+}
+
+void Camera::SetProjection(ProjectionMode mode)
+{
+    projection = mode;
+}
+
+void Camera::SetFlySpeedScale(double scale)
+{
+    flySpeedScale = std::clamp(scale, kFlySpeedMin, kFlySpeedMax);
 }
 
 void Camera::ApplyOrbitAngles(float yawAngle, float pitchAngle)
 {
     XMVECTOR current = LoadOrientation(*this);
     const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
-    const XMVECTOR right = XMVector3Rotate(XMVectorSet(1, 0, 0, 0), current);
-    const XMVECTOR yaw = XMQuaternionRotationAxis(worldUp, yawAngle);
-    const XMVECTOR pitch = XMQuaternionRotationAxis(right, pitchAngle);
-    current = XMQuaternionNormalize(XMQuaternionMultiply(XMQuaternionMultiply(current, yaw), pitch));
+    // Turntable orbit: yaw about the world up axis, pitch about the camera
+    // right axis. Composed as quaternion multiplies there is no Euler order
+    // and no gimbal lock; the pole clamp below only keeps the horizon from
+    // flipping when the view would cross straight over the top.
+    current = XMQuaternionNormalize(XMQuaternionMultiply(current,
+        XMQuaternionRotationAxis(worldUp, yawAngle)));
+    if (pitchAngle != 0.0f)
+    {
+        const XMVECTOR right = XMVector3Rotate(XMVectorSet(1, 0, 0, 0), current);
+        const XMVECTOR pitched = XMQuaternionNormalize(XMQuaternionMultiply(current,
+            XMQuaternionRotationAxis(right, pitchAngle)));
+        const XMVECTOR forward = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), pitched);
+        if (std::abs(XMVectorGetX(XMVector3Dot(forward, worldUp))) <= kPitchPoleLimit)
+        {
+            current = pitched;
+        }
+    }
     XMStoreFloat4(&orientation, current);
     orientationAnimating = false;
 }
@@ -236,11 +301,16 @@ void Camera::Look(float deltaX, float deltaY)
     const XMVECTOR eye = target + XMVector3Rotate(XMVectorSet(0, 0, static_cast<float>(distance), 0), current);
 
     const XMVECTOR up = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), current);
-    const XMVECTOR yaw = XMQuaternionRotationAxis(up, -deltaX * 0.006f);
+    const XMVECTOR yaw = XMQuaternionRotationAxis(up, -deltaX * kLookPixelsToRadians);
     current = XMQuaternionNormalize(XMQuaternionMultiply(current, yaw));
     const XMVECTOR right = XMVector3Rotate(XMVectorSet(1, 0, 0, 0), current);
-    const XMVECTOR pitch = XMQuaternionRotationAxis(right, -deltaY * 0.006f);
-    current = XMQuaternionNormalize(XMQuaternionMultiply(current, pitch));
+    const XMVECTOR pitched = XMQuaternionNormalize(XMQuaternionMultiply(current,
+        XMQuaternionRotationAxis(right, -deltaY * kLookPixelsToRadians)));
+    const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
+    const XMVECTOR forward = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), pitched);
+    // Unreal-style freelook: yaw freely, but clamp pitch at the horizon pole.
+    current = std::abs(XMVectorGetX(XMVector3Dot(forward, worldUp))) > kPitchPoleLimit
+        ? current : pitched;
 
     const XMVECTOR newTarget = eye - XMVector3Rotate(
         XMVectorSet(0, 0, static_cast<float>(distance), 0), current);
@@ -273,6 +343,7 @@ void Camera::ShiftPivot(double x, double y, double z)
 void Camera::Pan(float deltaX, float deltaY, float viewportHeight)
 {
     if (viewportHeight <= 1.0f) return;
+    if (viewportHeight > 1.0f) lastViewportHeight = viewportHeight;
     const XMVECTOR current = LoadOrientation(*this);
     XMFLOAT3 right{};
     XMFLOAT3 up{};
@@ -284,10 +355,58 @@ void Camera::Pan(float deltaX, float deltaY, float viewportHeight)
         (-right.z * deltaX + up.z * deltaY) * unitsPerPixel);
 }
 
+void Camera::Truck(float deltaX, float deltaY, float viewportHeight, bool axisSnap)
+{
+    if (viewportHeight <= 1.0f) return;
+    lastViewportHeight = viewportHeight;
+    const XMVECTOR current = LoadOrientation(*this);
+    const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
+    const XMVECTOR forward3 = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), current);
+    const XMVECTOR right3 = XMVector3Rotate(XMVectorSet(1, 0, 0, 0), current);
+    XMFLOAT3 forwardValue{};
+    XMFLOAT3 rightValue{};
+    XMStoreFloat3(&forwardValue, forward3);
+    XMStoreFloat3(&rightValue, right3);
+
+    XMVECTOR flatForward = XMVectorSet(forwardValue.x, 0, forwardValue.z, 0);
+    if (XMVectorGetX(XMVector3LengthSq(flatForward)) < 1e-6f)
+    {
+        // Looking straight up/down: right stays horizontal (pitch is applied
+        // about it), so derive forward from it instead of leaving it
+        // undefined, keeping truck direction continuous through the pole.
+        flatForward = XMVector3Cross(worldUp, XMVectorSet(rightValue.x, 0, rightValue.z, 0));
+    }
+    flatForward = XMVector3Normalize(flatForward);
+    XMVECTOR flatRight = XMVector3Normalize(XMVectorSet(rightValue.x, 0, rightValue.z, 0));
+    if (axisSnap)
+    {
+        const float yaw = std::atan2(XMVectorGetX(flatForward), XMVectorGetZ(flatForward));
+        const float snapped = std::round(yaw / XM_PIDIV2) * XM_PIDIV2;
+        flatForward = XMVectorSet(std::sin(snapped), 0, std::cos(snapped), 0);
+        flatRight = XMVector3Cross(flatForward, worldUp);
+    }
+
+    XMFLOAT3 forwardFlat{};
+    XMFLOAT3 rightFlat{};
+    XMStoreFloat3(&forwardFlat, flatForward);
+    XMStoreFloat3(&rightFlat, flatRight);
+    const double unitsPerPixel = 2.0 * distance * std::tan(kVerticalFieldOfView * 0.5) / viewportHeight;
+    ShiftPivot((-rightFlat.x * deltaX + forwardFlat.x * deltaY) * unitsPerPixel, 0.0,
+        (-rightFlat.z * deltaX + forwardFlat.z * deltaY) * unitsPerPixel);
+}
+
 void Camera::Dolly(float wheelSteps)
 {
     targetDistance *= std::exp(-static_cast<double>(wheelSteps) * 0.16);
     targetDistance = std::clamp(targetDistance, sceneRadius * 0.025, sceneRadius * 250.0);
+}
+
+void Camera::DollyDrag(float deltaY)
+{
+    // Ctrl+MMB drag: pull up to close in, push down to pull back. Exponential
+    // in the drag distance, so the response feels proportional at any scale.
+    targetDistance = std::clamp(targetDistance * std::exp(static_cast<double>(deltaY) * kDollyDragPerPixel),
+        sceneRadius * 0.025, sceneRadius * 250.0);
 }
 
 void Camera::MoveLocal(float rightAmount, float upAmount, float forwardAmount)
@@ -322,10 +441,18 @@ void Camera::SeedOrbitInertia(float velocityX, float velocityY)
     inertiaY = std::clamp(static_cast<double>(velocityY), -kInertiaMaxPixelsPerSecond, kInertiaMaxPixelsPerSecond);
 }
 
+void Camera::SeedPanInertia(float velocityX, float velocityY)
+{
+    panInertiaX = std::clamp(static_cast<double>(velocityX), -kInertiaMaxPixelsPerSecond, kInertiaMaxPixelsPerSecond);
+    panInertiaY = std::clamp(static_cast<double>(velocityY), -kInertiaMaxPixelsPerSecond, kInertiaMaxPixelsPerSecond);
+}
+
 void Camera::CancelInertia()
 {
     inertiaX = 0.0;
     inertiaY = 0.0;
+    panInertiaX = 0.0;
+    panInertiaY = 0.0;
 }
 
 void Camera::StopMotion()
@@ -339,6 +466,8 @@ void Camera::StopMotion()
     panRateX = 0.0;
     panRateY = 0.0;
     CancelInertia();
+    // A stopped camera keeps its projection blend settled where it is; the
+    // blend continues to ease toward the selected mode via Update().
 }
 
 double Camera::FlightSpeed() const
@@ -347,7 +476,7 @@ double Camera::FlightSpeed() const
     // closes in on the subject for precision, faster when pulled back.
     const double base = std::max(sceneRadius * 1.25, 1e-9);
     const double zoomScale = std::clamp(distance / std::max(1e-9, sceneRadius * 2.0), 0.22, 2.8);
-    return base * zoomScale * (input.fast ? kBoostMultiplier : 1.0);
+    return base * zoomScale * (input.fast ? kBoostMultiplier : 1.0) * flySpeedScale;
 }
 
 void Camera::Update(double deltaTime)
@@ -403,7 +532,8 @@ void Camera::Update(double deltaTime)
     if (std::abs(panRateY) < 25.0) panRateY = 0.0;
     if (panRateX != 0.0 || panRateY != 0.0)
     {
-        Pan(static_cast<float>(panRateX * deltaTime), static_cast<float>(panRateY * deltaTime), input.viewportHeight);
+        Truck(static_cast<float>(panRateX * deltaTime), static_cast<float>(panRateY * deltaTime), input.viewportHeight,
+            /*axisSnap=*/false);
     }
 
     // Post-drag orbit inertia.
@@ -417,6 +547,36 @@ void Camera::Update(double deltaTime)
         if (std::abs(inertiaX) < kInertiaMinPixelsPerSecond && std::abs(inertiaY) < kInertiaMinPixelsPerSecond)
         {
             CancelInertia();
+        }
+    }
+
+    // Post-drag pan inertia, exponentially damped the same way.
+    if (panInertiaX != 0.0 || panInertiaY != 0.0)
+    {
+        const double height = lastViewportHeight;
+        if (height > 1.0)
+        {
+            Truck(static_cast<float>(panInertiaX * deltaTime), static_cast<float>(panInertiaY * deltaTime),
+                static_cast<float>(height), /*axisSnap=*/false);
+        }
+        const double decay = deltaTime > 0.0 ? std::exp(-deltaTime / kInertiaDecaySeconds) : 0.0;
+        panInertiaX *= decay;
+        panInertiaY *= decay;
+        if (std::abs(panInertiaX) < kInertiaMinPixelsPerSecond && std::abs(panInertiaY) < kInertiaMinPixelsPerSecond)
+        {
+            panInertiaX = 0.0;
+            panInertiaY = 0.0;
+        }
+    }
+
+    // Perspective <-> orthographic cross-fade. Blending the two projection
+    // matrices per element reads as a short dolly-zoom instead of a hard cut.
+    {
+        const double projectionTarget = projection == ProjectionMode::Orthographic ? 1.0 : 0.0;
+        if (projectionBlend != projectionTarget)
+        {
+            projectionBlend += (projectionTarget - projectionBlend) * EaseFactor(deltaTime, kProjectionBlendSeconds);
+            if (std::abs(projectionBlend - projectionTarget) < 0.002) projectionBlend = projectionTarget;
         }
     }
 
@@ -473,9 +633,75 @@ bool Camera::HasMotion() const
     if (orbitRateX != 0.0 || orbitRateY != 0.0) return true;
     if (panRateX != 0.0 || panRateY != 0.0) return true;
     if (inertiaX != 0.0 || inertiaY != 0.0) return true;
+    if (panInertiaX != 0.0 || panInertiaY != 0.0) return true;
     if (pivotAnimating || orientationAnimating) return true;
     if (distance != targetDistance) return true;
+    if (projectionBlend != (projection == ProjectionMode::Orthographic ? 1.0 : 0.0)) return true;
     return false;
+}
+
+XMVECTOR Camera::Orientation() const
+{
+    return LoadOrientation(*this);
+}
+
+XMVECTOR Camera::EyePosition() const
+{
+    const XMVECTOR pivot = XMVectorSet(static_cast<float>(targetX), static_cast<float>(targetY),
+        static_cast<float>(targetZ), 1.0f);
+    return pivot + XMVector3Rotate(XMVectorSet(0, 0, static_cast<float>(distance), 0), Orientation());
+}
+
+double Camera::FarBound() const
+{
+    // Robust far plane for panned/flown-away cameras: the eye-to-scene-center
+    // distance is bounded by the pivot distance plus the pivot's drift from
+    // the scene's cached home center.
+    const double driftX = targetX - homeX;
+    const double driftY = targetY - homeY;
+    const double driftZ = targetZ - homeZ;
+    const double drift = std::sqrt(driftX * driftX + driftY * driftY + driftZ * driftZ);
+    return distance + drift + sceneRadius * 8.0;
+}
+
+XMMATRIX Camera::ViewMatrix() const
+{
+    const XMVECTOR eye = EyePosition();
+    const XMVECTOR pivot = XMVectorSet(static_cast<float>(targetX), static_cast<float>(targetY),
+        static_cast<float>(targetZ), 1.0f);
+    // The camera's own up is always perpendicular to its forward by
+    // construction (yaw/pitch compose about the camera's own axes), so the
+    // look-at never degenerates; the guard covers bit-level edge cases only.
+    XMVECTOR up = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), Orientation());
+    const XMVECTOR viewAxis = XMVector3Normalize(XMVectorSubtract(eye, pivot));
+    if (std::abs(XMVectorGetX(XMVector3Dot(XMVector3Normalize(up), viewAxis))) > 0.999999f)
+    {
+        up = XMVectorSet(0, 0, 1, 0);
+    }
+    return XMMatrixLookAtRH(eye, pivot, up);
+}
+
+XMMATRIX Camera::ProjectionMatrix(float aspect) const
+{
+    aspect = std::max(0.05f, aspect);
+    const float nearPlane = static_cast<float>(std::max(sceneRadius * 0.00001, distance * 0.0005));
+    const float farPlane = static_cast<float>(std::max(FarBound(), static_cast<double>(nearPlane) * 100.0));
+    const XMMATRIX perspective = XMMatrixPerspectiveFovRH(kVerticalFieldOfView, aspect, nearPlane, farPlane);
+    if (projectionBlend <= 0.0) return perspective;
+    // Orthographic half-height matches the perspective frustum height at the
+    // pivot distance, so the toggle preserves framing and dolly stays unified.
+    const float halfHeight = static_cast<float>(distance * std::tan(kVerticalFieldOfView * 0.5));
+    const XMMATRIX orthographic = XMMatrixOrthographicRH(halfHeight * aspect * 2.0f, halfHeight * 2.0f,
+        nearPlane, farPlane);
+    if (projectionBlend >= 1.0) return orthographic;
+    const float t = static_cast<float>(projectionBlend);
+    const float smooth = t * t * (3.0f - 2.0f * t);
+    XMMATRIX blended{};
+    for (int row = 0; row < 4; ++row)
+    {
+        blended.r[row] = XMVectorLerp(perspective.r[row], orthographic.r[row], smooth);
+    }
+    return blended;
 }
 
 RECT CalculateErrorCardRect(int width, int height, int toolbarHeight, float dpiScale)
@@ -523,6 +749,7 @@ struct Renderer::Impl
     ComPtr<IDWriteTextFormat> bodyFormat;
     ComPtr<IDWriteTextFormat> smallFormat;
     ComPtr<IDWriteTextFormat> filenameFormat;
+    ComPtr<IDWriteTextFormat> gizmoFormat;
     float textScale = 0.0f;
 
     bool CreateTargets(std::wstring& error)
@@ -572,6 +799,7 @@ struct Renderer::Impl
     {
         if (std::abs(textScale - scale) < 0.01f && bodyFormat) return true;
         headingFormat.Reset(); bodyFormat.Reset(); smallFormat.Reset(); filenameFormat.Reset();
+        gizmoFormat.Reset();
         textScale = scale;
         auto create = [&](float size, DWRITE_FONT_WEIGHT weight, ComPtr<IDWriteTextFormat>& output)
         {
@@ -581,11 +809,14 @@ struct Renderer::Impl
         if (!create(22, DWRITE_FONT_WEIGHT_SEMI_BOLD, headingFormat) ||
             !create(14, DWRITE_FONT_WEIGHT_NORMAL, bodyFormat) ||
             !create(12, DWRITE_FONT_WEIGHT_NORMAL, smallFormat) ||
-            !create(13, DWRITE_FONT_WEIGHT_SEMI_BOLD, filenameFormat)) return false;
+            !create(13, DWRITE_FONT_WEIGHT_SEMI_BOLD, filenameFormat) ||
+            !create(10, DWRITE_FONT_WEIGHT_SEMI_BOLD, gizmoFormat)) return false;
         headingFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         headingFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         filenameFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         smallFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        gizmoFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        gizmoFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         return true;
     }
 
@@ -604,7 +835,87 @@ struct Renderer::Impl
             D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
-    void DrawOverlay(const OverlayInfo& overlay)
+    void DrawGizmo(const Camera& camera, const NavGizmo& gizmo, float scale)
+    {
+        if (!gizmoFormat) return;
+        const NavGizmo::DrawGeometry g = gizmo.ComputeDraw(camera.Orientation());
+        const D2D1_POINT_2F center{ g.centerX, g.centerY };
+        const D2D1_COLOR_F axisColors[3] = {
+            D2D1::ColorF(0.98f, 0.28f, 0.32f, 1.0f),   // X red
+            D2D1::ColorF(0.30f, 0.84f, 0.18f, 1.0f),   // Y green
+            D2D1::ColorF(0.24f, 0.57f, 1.00f, 1.0f) }; // Z blue
+        const wchar_t axisLetters[3] = { L'X', L'Y', L'Z' };
+
+        // Ball: a quiet disc that brightens when the orbit-drag target.
+        const bool ballHover = g.hover == NavGizmo::Part::Ball;
+        SetBrush(D2D1::ColorF(0x11141A, ballHover ? 0.32f : 0.16f));
+        overlayTarget->FillEllipse(D2D1::Ellipse(center, g.outerRadius, g.outerRadius), brush.Get());
+        SetBrush(D2D1::ColorF(0xB9B9C2, ballHover ? 0.95f : 0.40f));
+        overlayTarget->DrawEllipse(D2D1::Ellipse(center, g.outerRadius, g.outerRadius), brush.Get(), Scale(1.1f, scale));
+
+        // Stems, dimmed when their axis points away from the viewer.
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            const float depth = (g.positive[axis].depth + g.negative[axis].depth) * 0.5f;
+            const bool hovered = g.hover == static_cast<NavGizmo::Part>(
+                static_cast<int>(NavGizmo::Part::PosX) + axis);
+            const float alpha = depth >= 0.0f ? 0.95f : (hovered ? 0.75f : 0.40f);
+            SetBrush(D2D1::ColorF(axisColors[axis].r, axisColors[axis].g, axisColors[axis].b, alpha));
+            overlayTarget->DrawLine(center,
+                D2D1::Point2F(center.x + g.positive[axis].x, center.y + g.positive[axis].y),
+                brush.Get(), g.stemWidth);
+        }
+
+        // Nodes and dots, painted back to front by view-space depth so the
+        // gizmo reads as a small 3D object rather than a flat diagram.
+        struct NodePaint
+        {
+            const NavGizmo::NodeGeometry* node;
+            int axis;
+            bool positive;
+        };
+        NodePaint nodes[6]{};
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            nodes[axis] = { &g.positive[axis], axis, true };
+            nodes[axis + 3] = { &g.negative[axis], axis, false };
+        }
+        std::sort(nodes, nodes + 6, [](const NodePaint& a, const NodePaint& b)
+            { return a.node->depth < b.node->depth; });
+        for (const NodePaint& node : nodes)
+        {
+            const float radius = node.positive ? g.nodeRadius : g.dotRadius;
+            const D2D1_POINT_2F position{ center.x + node.node->x, center.y + node.node->y };
+            const NavGizmo::Part part = static_cast<NavGizmo::Part>(
+                static_cast<int>(NavGizmo::Part::PosX) + node.axis + (node.positive ? 0 : 3));
+            const bool hovered = g.hover == part;
+            const bool behind = node.node->depth < 0.0f;
+            const D2D1_COLOR_F base = axisColors[node.axis];
+            const float dim = behind && !hovered ? 0.55f : 1.0f;
+            const float lift = hovered ? 0.35f : 0.0f;
+            SetBrush(D2D1::ColorF(
+                std::min(1.0f, base.r * dim + lift),
+                std::min(1.0f, base.g * dim + lift),
+                std::min(1.0f, base.b * dim + lift),
+                behind && !hovered ? 0.60f : 1.0f));
+            overlayTarget->FillEllipse(D2D1::Ellipse(position, radius, radius), brush.Get());
+            if (hovered)
+            {
+                SetBrush(D2D1::ColorF(0xFFFFFF, 0.95f));
+                overlayTarget->DrawEllipse(D2D1::Ellipse(position, radius, radius), brush.Get(), Scale(1.6f, scale));
+            }
+            if (node.positive)
+            {
+                const std::wstring letter(1, axisLetters[node.axis]);
+                SetBrush(D2D1::ColorF(0xFFFFFF, behind ? 0.80f : 1.0f));
+                overlayTarget->DrawTextW(letter.c_str(), static_cast<UINT32>(letter.size()), gizmoFormat.Get(),
+                    D2D1::RectF(position.x - radius, position.y - radius, position.x + radius, position.y + radius),
+                    brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
+        }
+    }
+
+    void DrawOverlay(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo)
     {
         if (!overlayTarget || !brush) return;
         if (overlay.state != ViewerState::Loading && !CreateTextFormats(overlay.dpiScale)) return;
@@ -750,6 +1061,31 @@ struct Renderer::Impl
                 size * 0.5f, size * 0.5f), brush.Get());
             DrawText(L"!", filenameFormat.Get(), D2D1::RectF(right - size, bottom - size + Scale(2, scale), right, bottom),
                 D2D1::ColorF(0xFFFFFF), DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
+        // Transient mode readouts (fly speed, grid/projection toggles).
+        auto drawHud = [&](const std::wstring& text, float alpha, float bottomOffset)
+        {
+            if (alpha <= 0.01f || text.empty() || overlay.state != ViewerState::Ready) return;
+            const float pillHeight = Scale(26, scale);
+            const float pillWidth = std::min(clientWidth - Scale(28, scale),
+                std::max(Scale(96, scale), Scale(14, scale) + static_cast<float>(text.size()) * Scale(7.6f, scale)));
+            const float left = (clientWidth - pillWidth) * 0.5f;
+            const float top = clientHeight - bottomOffset - pillHeight;
+            const D2D1_ROUNDED_RECT pill = D2D1::RoundedRect(D2D1::RectF(left, top, left + pillWidth, top + pillHeight),
+                pillHeight * 0.5f, pillHeight * 0.5f);
+            SetBrush(D2D1::ColorF(0x111318, 0.84f * alpha));
+            overlayTarget->FillRoundedRectangle(pill, brush.Get());
+            DrawText(text, smallFormat.Get(), D2D1::RectF(left, top, left + pillWidth, top + pillHeight),
+                D2D1::ColorF(0xE8EAED, alpha), DWRITE_TEXT_ALIGNMENT_CENTER);
+        };
+        drawHud(overlay.speedHud, overlay.speedHudAlpha, Scale(84, scale));
+        drawHud(overlay.modeHud, overlay.modeHudAlpha, Scale(50, scale));
+
+        // Navigation gizmo on top of everything else.
+        if (overlay.state == ViewerState::Ready && overlay.hasModel)
+        {
+            DrawGizmo(camera, gizmo, scale);
         }
 
         if (overlayTarget->EndDraw() == D2DERR_RECREATE_TARGET)
@@ -999,7 +1335,7 @@ bool Renderer::HasModel() const
     return impl_->vertexBuffer && impl_->indexBuffer && impl_->indexCount > 0;
 }
 
-void Renderer::Render(const Camera& camera, const OverlayInfo& overlay)
+void Renderer::Render(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo)
 {
     if (!impl_->context || !impl_->renderTarget || impl_->width <= 0 || impl_->height <= 0) return;
     ID3D11RenderTargetView* renderTarget = impl_->renderTarget.Get();
@@ -1021,26 +1357,14 @@ void Renderer::Render(const Camera& camera, const OverlayInfo& overlay)
     impl_->context->VSSetShader(impl_->vertexShader.Get(), nullptr, 0);
     impl_->context->PSSetShader(impl_->pixelShader.Get(), nullptr, 0);
 
-    const XMVECTOR orientation = LoadOrientation(camera);
-    const XMVECTOR offset = XMVector3Rotate(XMVectorSet(0, 0, static_cast<float>(camera.distance), 0), orientation);
-    const XMVECTOR target = XMVectorSet(static_cast<float>(camera.targetX), static_cast<float>(camera.targetY),
-        static_cast<float>(camera.targetZ), 1);
-    const XMVECTOR eye = target + offset;
-    XMVECTOR up = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), orientation);
-    const XMMATRIX view = XMMatrixLookAtRH(eye, target, up);
+    const XMVECTOR eye = camera.EyePosition();
+    const XMMATRIX view = camera.ViewMatrix();
     const float aspect = static_cast<float>(impl_->width) / viewportHeight;
-    const float nearPlane = static_cast<float>(std::max(camera.sceneRadius * 0.00001, camera.distance * 0.0005));
-    const XMVECTOR sceneCenter = XMVectorSet(
-        (impl_->boundsMin.x + impl_->boundsMax.x) * 0.5f,
-        (impl_->boundsMin.y + impl_->boundsMax.y) * 0.5f,
-        (impl_->boundsMin.z + impl_->boundsMax.z) * 0.5f, 1.0f);
-    const double distanceToScene = static_cast<double>(XMVectorGetX(XMVector3Length(sceneCenter - eye)));
-    const float farPlane = static_cast<float>(std::max(
-        distanceToScene + camera.sceneRadius * 8.0, static_cast<double>(nearPlane) * 100.0));
-    const XMMATRIX projection = XMMatrixPerspectiveFovRH(kVerticalFieldOfView, std::max(0.05f, aspect), nearPlane, farPlane);
+    const XMMATRIX projection = camera.ProjectionMatrix(aspect);
     FrameConstants constants;
     XMStoreFloat4x4(&constants.viewProjection, view * projection);
     XMStoreFloat4(&constants.cameraPosition, eye);
+    constants.options = XMFLOAT4(overlay.selectionAmount, 0.0f, 0.0f, 0.0f);
     impl_->context->UpdateSubresource(impl_->constantBuffer.Get(), 0, nullptr, &constants, 0, 0);
     ID3D11Buffer* constantBuffer = impl_->constantBuffer.Get();
     impl_->context->VSSetConstantBuffers(0, 1, &constantBuffer);
@@ -1048,7 +1372,7 @@ void Renderer::Render(const Camera& camera, const OverlayInfo& overlay)
 
     const UINT stride = sizeof(ModelVertex);
     const UINT offsetBytes = 0;
-    if (!loading && impl_->gridBuffer)
+    if (!loading && impl_->gridBuffer && overlay.gridVisible)
     {
         ID3D11Buffer* grid = impl_->gridBuffer.Get();
         impl_->context->IASetVertexBuffers(0, 1, &grid, &stride, &offsetBytes);
@@ -1064,6 +1388,6 @@ void Renderer::Render(const Camera& camera, const OverlayInfo& overlay)
         impl_->context->DrawIndexed(impl_->indexCount, 0, 0);
     }
 
-    impl_->DrawOverlay(overlay);
+    impl_->DrawOverlay(camera, overlay, gizmo);
     impl_->swapChain->Present(1, 0);
 }

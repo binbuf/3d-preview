@@ -149,6 +149,7 @@
   <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="Model.h" />
+    <ClInclude Include="NavGizmo.h" />
     <ClInclude Include="Preview3D.h" />
     <ClInclude Include="Renderer.h" />
     <ClInclude Include="Resource.h" />
@@ -156,6 +157,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Model.cpp" />
+    <ClCompile Include="NavGizmo.cpp" />
     <ClCompile Include="Preview3D.cpp" />
     <ClCompile Include="Renderer.cpp" />
   </ItemGroup>

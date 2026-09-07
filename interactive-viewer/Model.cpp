@@ -1249,3 +1249,45 @@ LoadResult LoadGlb(const std::wstring& path, const std::shared_ptr<std::atomic_b
     result.model = std::move(model);
     return result;
 }
+
+bool PickMesh(const ModelData& model, const XMFLOAT3& origin, const XMFLOAT3& direction, float& hitDistance)
+{
+    // Moller-Trumbore ray/triangle intersection over the world-space triangle
+    // soup. This runs once per click (not per frame), so a linear scan keeps
+    // picking exact without a spatial index to build and keep in sync.
+    const XMVECTOR rayOrigin = XMLoadFloat3(&origin);
+    const XMVECTOR rayDirection = XMVector3Normalize(XMLoadFloat3(&direction));
+    const std::uint32_t vertexCount = static_cast<std::uint32_t>(model.vertices.size());
+    const std::uint32_t triangleCount = static_cast<std::uint32_t>(model.indices.size() / 3);
+    float best = std::numeric_limits<float>::infinity();
+
+    for (std::uint32_t triangle = 0; triangle < triangleCount; ++triangle)
+    {
+        const std::uint32_t index[3] = {
+            model.indices[triangle * 3],
+            model.indices[triangle * 3 + 1],
+            model.indices[triangle * 3 + 2]
+        };
+        if (index[0] >= vertexCount || index[1] >= vertexCount || index[2] >= vertexCount) continue;
+        const XMVECTOR v0 = XMLoadFloat3(&model.vertices[index[0]].position);
+        const XMVECTOR v1 = XMLoadFloat3(&model.vertices[index[1]].position);
+        const XMVECTOR v2 = XMLoadFloat3(&model.vertices[index[2]].position);
+        const XMVECTOR edge1 = XMVectorSubtract(v1, v0);
+        const XMVECTOR edge2 = XMVectorSubtract(v2, v0);
+        const XMVECTOR p = XMVector3Cross(rayDirection, edge2);
+        const float determinant = XMVectorGetX(XMVector3Dot(edge1, p));
+        if (std::abs(determinant) < 1e-12f) continue;
+        const float inverse = 1.0f / determinant;
+        const XMVECTOR t = XMVectorSubtract(rayOrigin, v0);
+        const float u = XMVectorGetX(XMVector3Dot(t, p)) * inverse;
+        if (u < 0.0f || u > 1.0f) continue;
+        const XMVECTOR q = XMVector3Cross(t, edge1);
+        const float v = XMVectorGetX(XMVector3Dot(rayDirection, q)) * inverse;
+        if (v < 0.0f || u + v > 1.0f) continue;
+        const float distance = XMVectorGetX(XMVector3Dot(edge2, q)) * inverse;
+        if (distance > 1e-4f && distance < best) best = distance;
+    }
+    if (!std::isfinite(best)) return false;
+    hitDistance = best;
+    return true;
+}

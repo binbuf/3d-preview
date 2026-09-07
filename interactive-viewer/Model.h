@@ -41,3 +41,13 @@ LoadResult LoadGlb(
     const std::wstring& path,
     const std::shared_ptr<std::atomic_bool>& cancel,
     const LoadProgressCallback& progress);
+
+// Ray-versus-mesh intersection for click selection. The importer bakes node
+// transforms, so vertices are already in world space and the ray is cast in
+// world space. `direction` does not need to be normalized. Returns true and
+// sets `hitDistance` to the entry distance along the normalized direction.
+bool PickMesh(
+    const ModelData& model,
+    const DirectX::XMFLOAT3& origin,
+    const DirectX::XMFLOAT3& direction,
+    float& hitDistance);
