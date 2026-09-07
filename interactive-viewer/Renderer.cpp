@@ -300,13 +300,17 @@ void Camera::Look(float deltaX, float deltaY)
         static_cast<float>(targetZ), 1.0f);
     const XMVECTOR eye = target + XMVector3Rotate(XMVectorSet(0, 0, static_cast<float>(distance), 0), current);
 
-    const XMVECTOR up = XMVector3Rotate(XMVectorSet(0, 1, 0, 0), current);
-    const XMVECTOR yaw = XMQuaternionRotationAxis(up, -deltaX * kLookPixelsToRadians);
+    const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
+    // Yaw about world up, not the camera's local up: once the camera is
+    // pitched, its local up axis is tilted, and yawing about it banks the
+    // horizon instead of turning level. Unreal's editor free-look (and our
+    // own orbit drag, see ApplyOrbitAngles) always yaws about world up so
+    // the camera stays level to the ground plane through any pitch.
+    const XMVECTOR yaw = XMQuaternionRotationAxis(worldUp, -deltaX * kLookPixelsToRadians);
     current = XMQuaternionNormalize(XMQuaternionMultiply(current, yaw));
     const XMVECTOR right = XMVector3Rotate(XMVectorSet(1, 0, 0, 0), current);
     const XMVECTOR pitched = XMQuaternionNormalize(XMQuaternionMultiply(current,
         XMQuaternionRotationAxis(right, -deltaY * kLookPixelsToRadians)));
-    const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
     const XMVECTOR forward = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), pitched);
     // Unreal-style freelook: yaw freely, but clamp pitch at the horizon pole.
     current = std::abs(XMVectorGetX(XMVector3Dot(forward, worldUp))) > kPitchPoleLimit
