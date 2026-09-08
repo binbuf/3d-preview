@@ -197,13 +197,14 @@ The trusted viewer links no third-party format parser or decoder — not fastglt
 
 ```text
 Directory.Build.props/targets       shared compiler/link/security policy
-3d-preview-windows.slnx             root solution
+Preview3D.slnx                      root solution
 vcpkg.json                          dependency manifest
 vcpkg-configuration.json            pinned registry baseline
 .docs/design/                       normative documents
 shared/model-core/
   include/                          normalized scene/chunk schema, wire-format contracts
   src/                              format adapters, resolver, normalization (linked only by import-worker/import-host)
+  ModelCore.vcxproj                 static library
 shared/import-broker/                broker protocol, AppContainer/Job Object launch, shared-section validation (shared by both import processes' host-side code)
 shared/platform/                     Win32 RAII, checked math, paths, mapping
 import-worker/
@@ -236,3 +237,5 @@ scripts/                            reproducible build/test/package commands
 ```
 
 The current `interactive-viewer` code is a GLB-only vertical slice used to validate the responsive-shell/camera architecture; it does not yet have the import-worker/broker split above and parses GLB in-process on a background thread (see [ADR-014](./11-decisions-and-risks.md#adr-014-appcontainer-import-processes-are-the-parser-security-boundary-not-threads) for why that must not become the shipped ingestion path). Implementation removes global mutable application variables and splits responsibilities before broad-format feature work. Only x64 configurations ship; Win32 project configurations are removed or explicitly non-buildable to prevent accidental packaging.
+
+`import-worker/Preview3DImportWorker.vcxproj`, `compatibility-host/Preview3DImportHost.vcxproj`, and `shared/model-core/ModelCore.vcxproj` currently exist only as empty scaffold projects (a buildable entry point with no parser/broker/AppContainer logic yet) so the solution structure is in place before Gate 2 wires in the real import sandbox; `shared/import-broker/` and `shared/platform/` are plain source directories consumed by the projects above rather than standalone projects.

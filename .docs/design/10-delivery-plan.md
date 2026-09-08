@@ -10,9 +10,11 @@ No phase is complete because code compiles. Each gate has observable exit criter
 
 The current interactive-viewer and thumbnail-provider projects are Visual Studio wizard scaffolds. The first implementation change should preserve the user's native C++ pivot while replacing scaffold globals/layout deliberately.
 
+The root `Preview3D.slnx` below and empty `Preview3DImportWorker`, `Preview3DImportHost`, and `ModelCore` projects already exist as buildable placeholders (no parser/broker/AppContainer logic yet); Gate 2 fills them in rather than creating them (see [02-system-architecture.md](./02-system-architecture.md)).
+
 Target root layout:
 
-    3d-preview-windows.slnx
+    Preview3D.slnx
     Directory.Build.props
     Directory.Build.targets
     vcpkg.json
@@ -82,7 +84,7 @@ Exit:
 
 Deliver:
 
-- Win32 UI thread with DPI-v2, immediate #181A1F background, custom chrome/system behavior, input event queue, empty/loading/error AppState;
+- Win32 UI thread with DPI-v2, immediate #1C1C1E background, custom chrome/system behavior, input event queue, empty/loading/error AppState;
 - render thread owning D3D12 device/direct queue/three-buffer swap chain/frame fence and resize;
 - D3D11On12/Direct2D/DirectWrite overlay path;
 - fixed-shader neutral triangle/cube/point cloud, mouse/keyboard/touch camera orbit/pan/dolly/fit/reset;

@@ -1,0 +1,11 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="interactive-viewer/Preview3D.vcxproj" Id="2f97a4f3-051c-4e4f-8367-8232507290a9" />
+  <Project Path="thumbnail-provider/ThumbnailProvider3D.vcxproj" Id="0b5aa70c-f16a-42a1-95d1-73ad75d2fcbf" />
+  <Project Path="import-worker/Preview3DImportWorker.vcxproj" Id="499d3a16-e218-49e5-accd-caf92709f242" />
+  <Project Path="compatibility-host/Preview3DImportHost.vcxproj" Id="87ceca17-a6bd-45fb-84a9-9a5e9f4a793c" />
+  <Project Path="shared/model-core/ModelCore.vcxproj" Id="a1edc11c-012d-46db-ad8c-763723bfd340" />
+</Solution>
