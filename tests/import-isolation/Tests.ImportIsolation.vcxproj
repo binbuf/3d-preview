@@ -43,11 +43,17 @@
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\shared\platform\include;..\..\shared\import-broker\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- Every project in this solution shares one centralized output
+           directory, $(SolutionDir)$(Platform)\$(Configuration)\ (confirmed
+           by inspecting an actual solution build, not assumed). There is no
+           per-project "import-worker\x64\Debug\" subdirectory. -->
+      <PreprocessorDefinitions>PREVIEW3D_IMPORT_WORKER_EXE=LR"($(SolutionDir)$(Platform)\$(Configuration)\Preview3DImportWorker.exe)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>userenv.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -64,6 +70,24 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="HarnessSmokeTests.cpp" />
+    <ClCompile Include="SandboxLaunchTests.cpp" />
+    <ClCompile Include="..\..\shared\platform\src\AppContainerSid.cpp" />
+    <ClCompile Include="..\..\shared\platform\src\ProcThreadAttributeList.cpp" />
+    <ClCompile Include="..\..\shared\import-broker\src\SandboxLauncher.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\shared\platform\include\platform\Win32Handle.h" />
+    <ClInclude Include="..\..\shared\platform\include\platform\AppContainerSid.h" />
+    <ClInclude Include="..\..\shared\platform\include\platform\ProcThreadAttributeList.h" />
+    <ClInclude Include="..\..\shared\import-broker\include\import_broker\SandboxLauncher.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Build-order only (exe to exe, nothing to link): the test needs
+         Preview3DImportWorker.exe built and up to date before it runs. -->
+    <ProjectReference Include="..\..\import-worker\Preview3DImportWorker.vcxproj">
+      <Project>{499d3a16-e218-49e5-accd-caf92709f242}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
