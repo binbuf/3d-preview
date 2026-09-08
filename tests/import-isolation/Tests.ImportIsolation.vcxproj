@@ -43,7 +43,7 @@
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\shared\platform\include;..\..\shared\import-broker\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\shared\platform\include;..\..\shared\import-broker\include;..\..\shared\model-core\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <!-- Every project in this solution shares one centralized output
            directory, $(SolutionDir)$(Platform)\$(Configuration)\ (confirmed
            by inspecting an actual solution build, not assumed). There is no
@@ -71,15 +71,31 @@
   <ItemGroup>
     <ClCompile Include="HarnessSmokeTests.cpp" />
     <ClCompile Include="SandboxLaunchTests.cpp" />
+    <ClCompile Include="ImportPipelineTests.cpp" />
     <ClCompile Include="..\..\shared\platform\src\AppContainerSid.cpp" />
     <ClCompile Include="..\..\shared\platform\src\ProcThreadAttributeList.cpp" />
+    <ClCompile Include="..\..\shared\platform\src\MappedView.cpp" />
     <ClCompile Include="..\..\shared\import-broker\src\SandboxLauncher.cpp" />
+    <ClCompile Include="..\..\shared\import-broker\src\SharedSection.cpp" />
+    <ClCompile Include="..\..\shared\import-broker\src\SharedSectionValidator.cpp" />
+    <ClCompile Include="..\..\shared\model-core\src\ControlChannelIo.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="SandboxTestSupport.h" />
     <ClInclude Include="..\..\shared\platform\include\platform\Win32Handle.h" />
     <ClInclude Include="..\..\shared\platform\include\platform\AppContainerSid.h" />
     <ClInclude Include="..\..\shared\platform\include\platform\ProcThreadAttributeList.h" />
+    <ClInclude Include="..\..\shared\platform\include\platform\MappedView.h" />
+    <ClInclude Include="..\..\shared\platform\include\platform\CheckedMath.h" />
     <ClInclude Include="..\..\shared\import-broker\include\import_broker\SandboxLauncher.h" />
+    <ClInclude Include="..\..\shared\import-broker\include\import_broker\SharedSection.h" />
+    <ClInclude Include="..\..\shared\import-broker\include\import_broker\SharedSectionValidator.h" />
+    <ClInclude Include="..\..\shared\model-core\include\model_core\WireFormat.h" />
+    <ClInclude Include="..\..\shared\model-core\include\model_core\VertexLayouts.h" />
+    <ClInclude Include="..\..\shared\model-core\include\model_core\Checksum.h" />
+    <ClInclude Include="..\..\shared\model-core\include\model_core\ImportError.h" />
+    <ClInclude Include="..\..\shared\model-core\include\model_core\ControlProtocol.h" />
+    <ClInclude Include="..\..\shared\model-core\include\model_core\ControlChannelIo.h" />
   </ItemGroup>
   <ItemGroup>
     <!-- Build-order only (exe to exe, nothing to link): the test needs

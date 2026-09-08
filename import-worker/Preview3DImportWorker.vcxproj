@@ -59,6 +59,9 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>..\shared\platform\include;..\shared\model-core\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <Link>
       <AdditionalDependencies>ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
@@ -66,9 +69,22 @@
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\ContainmentProbes.cpp" />
+    <ClCompile Include="src\GenerationWorker.cpp" />
+    <ClCompile Include="src\SyntheticSceneGenerator.cpp" />
+    <ClCompile Include="..\shared\platform\src\MappedView.cpp" />
+    <ClCompile Include="..\shared\model-core\src\ControlChannelIo.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\ContainmentProbes.h" />
+    <ClInclude Include="src\GenerationWorker.h" />
+    <ClInclude Include="src\SyntheticSceneGenerator.h" />
+    <ClInclude Include="..\shared\platform\include\platform\MappedView.h" />
+    <ClInclude Include="..\shared\model-core\include\model_core\WireFormat.h" />
+    <ClInclude Include="..\shared\model-core\include\model_core\VertexLayouts.h" />
+    <ClInclude Include="..\shared\model-core\include\model_core\Checksum.h" />
+    <ClInclude Include="..\shared\model-core\include\model_core\ImportError.h" />
+    <ClInclude Include="..\shared\model-core\include\model_core\ControlProtocol.h" />
+    <ClInclude Include="..\shared\model-core\include\model_core\ControlChannelIo.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

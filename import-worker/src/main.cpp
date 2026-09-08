@@ -1,4 +1,5 @@
 #include "ContainmentProbes.h"
+#include "GenerationWorker.h"
 
 #include <windows.h>
 
@@ -47,6 +48,10 @@ int main(int argc, char* argv[])
 
     if (ArgEquals(argv[1], "--child-noop")) {
         return 0;
+    }
+
+    if (ArgEquals(argv[1], "--generate")) {
+        return import_worker::RunGeneration();
     }
 
     if (ArgEquals(argv[1], "--probes")) {

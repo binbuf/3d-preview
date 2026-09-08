@@ -15,6 +15,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include "SandboxTestSupport.h"
 #include "import_broker/SandboxLauncher.h"
 #include "platform/AppContainerSid.h"
 #include "platform/Win32Handle.h"
@@ -34,62 +35,10 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-#ifndef PREVIEW3D_IMPORT_WORKER_EXE
-#error "PREVIEW3D_IMPORT_WORKER_EXE must be defined by Tests.ImportIsolation.vcxproj"
-#endif
-
 namespace {
 
-const wchar_t* WorkerExePath()
-{
-    return PREVIEW3D_IMPORT_WORKER_EXE;
-}
-
-// Grants ALL APPLICATION PACKAGES / ALL RESTRICTED APPLICATION PACKAGES
-// read+execute on the worker's build output directory. AppContainer
-// processes are checked against these SIDs to load even their own .exe, and
-// a normal dev/CI build output folder has no such ACE by default -- without
-// this, every launch in this file fails at the loader level with
-// ERROR_ACCESS_DENIED before any of our own logic runs. Idempotent, so it
-// is safe to call once per test run.
-void GrantAppContainerAccessToWorkerDirectory()
-{
-    std::wstring exePath(WorkerExePath());
-    auto lastSlash = exePath.find_last_of(L"\\/");
-    std::wstring directory = (lastSlash == std::wstring::npos) ? L"." : exePath.substr(0, lastSlash);
-
-    std::wstring command = L"icacls \"" + directory
-        + L"\" /grant *S-1-15-2-1:(OI)(CI)RX /grant *S-1-15-2-2:(OI)(CI)RX /Q";
-    _wsystem(command.c_str());
-}
-
-std::wstring MakeUniqueContainerName()
-{
-    auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
-    return L"Preview3DSandboxSpike-" + std::to_wstring(GetCurrentProcessId()) + L"-"
-        + std::to_wstring(ticks);
-}
-
-// Owns a throwaway AppContainer profile for the lifetime of one test case,
-// so repeated runs don't accumulate entries under %LOCALAPPDATA%\Packages.
-struct SandboxFixture {
-    std::wstring containerName;
-    platform::AppContainerSid sid;
-
-    SandboxFixture()
-        : containerName(MakeUniqueContainerName())
-        , sid(platform::AppContainerSid::CreateOrOpen(
-              containerName, L"Preview3D Sandbox Spike",
-              L"Test-only AppContainer profile for the Gate 2 launch spike"))
-    {
-        GrantAppContainerAccessToWorkerDirectory();
-    }
-
-    ~SandboxFixture()
-    {
-        platform::AppContainerSid::Delete(containerName);
-    }
-};
+using sandbox_test_support::SandboxFixture;
+using sandbox_test_support::WorkerExePath;
 
 struct LaunchResult {
     import_broker::SandboxProcess proc;

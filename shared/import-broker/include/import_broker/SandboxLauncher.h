@@ -33,17 +33,18 @@ struct SandboxProcess {
 // assigns the process to a freshly configured Job Object (kill-on-close,
 // limits from `limits`), and returns without resuming it. Only the handles
 // in inheritedHandles are inherited by the child, via
-// PROC_THREAD_ATTRIBUTE_HANDLE_LIST -- stdOutput must also appear in
-// inheritedHandles or CreateProcessW fails. Job assignment happens inside
-// this call, before the caller can possibly resume the thread, so no worker
-// code ever runs with fewer restrictions than its final policy (see
-// ADR-014 in .docs/design/11-decisions-and-risks.md).
+// PROC_THREAD_ATTRIBUTE_HANDLE_LIST -- stdOutput (and stdInput, when
+// non-null) must also appear in inheritedHandles or CreateProcessW fails.
+// Job assignment happens inside this call, before the caller can possibly
+// resume the thread, so no worker code ever runs with fewer restrictions
+// than its final policy (see ADR-014 in .docs/design/11-decisions-and-risks.md).
 std::optional<SandboxProcess> LaunchSuspendedSandboxed(const std::wstring& exePath,
                                                         std::wstring commandLine,
                                                         std::span<HANDLE> inheritedHandles,
                                                         HANDLE stdOutput,
                                                         const SandboxLimits& limits,
-                                                        const platform::AppContainerSid& sid);
+                                                        const platform::AppContainerSid& sid,
+                                                        HANDLE stdInput = nullptr);
 
 // Resumes a process created by LaunchSuspendedSandboxed. Never call this
 // before job assignment has happened, which LaunchSuspendedSandboxed already

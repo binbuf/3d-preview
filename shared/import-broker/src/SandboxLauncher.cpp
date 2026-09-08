@@ -38,7 +38,8 @@ std::optional<SandboxProcess> LaunchSuspendedSandboxed(const std::wstring& exePa
                                                         std::span<HANDLE> inheritedHandles,
                                                         HANDLE stdOutput,
                                                         const SandboxLimits& limits,
-                                                        const platform::AppContainerSid& sid)
+                                                        const platform::AppContainerSid& sid,
+                                                        HANDLE stdInput)
 {
     platform::Win32Handle job = CreateConfiguredJob(limits);
     if (!job) {
@@ -64,7 +65,7 @@ std::optional<SandboxProcess> LaunchSuspendedSandboxed(const std::wstring& exePa
     si.StartupInfo.cb = sizeof(si);
     si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
     si.StartupInfo.hStdOutput = stdOutput;
-    si.StartupInfo.hStdInput = nullptr;
+    si.StartupInfo.hStdInput = stdInput;
     si.StartupInfo.hStdError = nullptr;
     si.lpAttributeList = attrList.get();
 
