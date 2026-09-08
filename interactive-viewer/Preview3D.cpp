@@ -88,6 +88,7 @@ struct ViewerApp
     int toolbarHeight = 52;
     int bottomBarHeight = 44;
     bool infoPanelVisible = false;
+    float infoPanelScrollOffset = 0.0f;   // logical px, clamped against content each RenderScene/wheel tick
     bool speedFlyoutOpen = false;
     bool speedSliderDragging = false;
     bool zoomSliderDragging = false;
@@ -234,6 +235,39 @@ int InfoPanelWidthPixels(const ViewerApp& app)
     GetClientRect(app.window, &client);
     return static_cast<int>(std::lround(ComputeInfoPanelLayout(
         client.right, client.bottom, app.toolbarHeight, app.bottomBarHeight, app.dpiScale).Width()));
+}
+
+// Client-px rect of the Information panel itself (as opposed to
+// InfoPanelWidthPixels' viewport-inset width alone) — used to route
+// WM_MOUSEWHEEL to the panel's own scrolling instead of camera dolly while
+// the cursor is over it. Empty (all zero) when the panel is closed.
+RECT InfoPanelRect(const ViewerApp& app)
+{
+    if (!app.infoPanelVisible || !HasNavigableModel(app)) return RECT{};
+    RECT client{};
+    GetClientRect(app.window, &client);
+    const InfoPanelLayout layout = ComputeInfoPanelLayout(
+        client.right, client.bottom, app.toolbarHeight, app.bottomBarHeight, app.dpiScale);
+    return RECT{ static_cast<int>(std::lround(layout.left)), static_cast<int>(std::lround(layout.top)),
+        static_cast<int>(std::lround(layout.right)), static_cast<int>(std::lround(layout.bottom)) };
+}
+
+// How far app.infoPanelScrollOffset may go before the section list's last row
+// reaches the panel's bottom edge — WM_MOUSEWHEEL clamps against this on
+// every tick (Renderer::DrawInfoPanel clamps again from the same
+// ComputeInfoPanelScrollMetrics when it draws, so the two can't disagree).
+float InfoPanelMaxScroll(const ViewerApp& app)
+{
+    if (!app.infoPanelVisible || !app.loadedModel) return 0.0f;
+    const RECT panel = InfoPanelRect(app);
+    const float panelHeight = static_cast<float>(panel.bottom - panel.top);
+    if (panelHeight <= 0.0f) return 0.0f;
+    const std::vector<InfoPanelSection> sections = BuildInfoPanelSections(
+        app.loadedModel->stats, app.loadedModel->triangleCount, app.loadedModel->vertices.size(),
+        app.loadedModel->boundsMin, app.loadedModel->boundsMax);
+    const InfoPanelScrollMetrics metrics = ComputeInfoPanelScrollMetrics(sections, app.dpiScale);
+    const float visibleHeight = std::max(0.0f, panelHeight - metrics.headerHeight);
+    return std::max(0.0f, metrics.contentHeight - visibleHeight);
 }
 
 float ViewportAspect(const ViewerApp& app)
@@ -906,6 +940,7 @@ void ToggleInfoPanel(ViewerApp& app)
 {
     if (!CanNavigate(app) || !ConsumeToggleCommand(app, ID_VIEW_INFO)) return;
     app.infoPanelVisible = !app.infoPanelVisible;
+    if (!app.infoPanelVisible) app.infoPanelScrollOffset = 0.0f;
     LayoutControls(app);
     UpdateGizmoLayout(app);
     InvalidateRect(app.window, nullptr, FALSE);
@@ -1423,6 +1458,7 @@ void RenderScene(ViewerApp& app)
         overlay.infoPanelSections = BuildInfoPanelSections(
             app.loadedModel->stats, app.loadedModel->triangleCount, app.loadedModel->vertices.size(),
             app.loadedModel->boundsMin, app.loadedModel->boundsMax);
+        overlay.infoPanelScrollOffset = app.infoPanelScrollOffset;
     }
     overlay.zoomPercent = ZoomPercentFor(app.camera);
     if (overlay.barBottomBarHeight > 0)
@@ -2264,9 +2300,20 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         }
         return 0;
     case WM_MOUSEWHEEL:
-        if (CanNavigate(*app))
+    {
+        POINT wheelPoint{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };   // screen coords for this message
+        ScreenToClient(window, &wheelPoint);
+        const float steps = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA;
+        const RECT infoPanel = InfoPanelRect(*app);
+        if (app->infoPanelVisible && PtInRect(&infoPanel, wheelPoint))
         {
-            const float steps = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA;
+            const float maxScroll = InfoPanelMaxScroll(*app);
+            app->infoPanelScrollOffset = std::clamp(
+                app->infoPanelScrollOffset - steps * static_cast<float>(Scale(*app, 48)), 0.0f, maxScroll);
+            InvalidateRect(window, nullptr, FALSE);
+        }
+        else if (CanNavigate(*app))
+        {
             if (app->flyLook) AdjustFlySpeed(*app, steps);
             else
             {
@@ -2275,6 +2322,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             }
         }
         return 0;
+    }
     case WM_INPUT:
         if (app->flyLook)
         {

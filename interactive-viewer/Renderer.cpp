@@ -1230,6 +1230,19 @@ struct Renderer::Impl
             D2D1::RectF(textLeft, y, textRight, y + Scale(22, scale)), D2D1::ColorF(0xF5F5F7));
         y += Scale(34, scale);
 
+        // Everything below the fixed header scrolls as one block
+        // (overlay.infoPanelScrollOffset, driven by the mouse wheel over the
+        // panel — see WM_MOUSEWHEEL in Preview3D.cpp), clipped to the panel's
+        // body so scrolled rows never bleed into the bars above/below it or
+        // the viewport to its left.
+        const float contentTop = y;
+        const float visibleHeight = std::max(0.0f, bottom - contentTop);
+        const InfoPanelScrollMetrics metrics = ComputeInfoPanelScrollMetrics(overlay.infoPanelSections, scale);
+        const float maxScroll = std::max(0.0f, metrics.contentHeight - visibleHeight);
+        const float scrollOffset = std::clamp(overlay.infoPanelScrollOffset, 0.0f, maxScroll);
+
+        overlayTarget->PushAxisAlignedClip(D2D1::RectF(left, contentTop, clientWidth, bottom), D2D1_ANTIALIAS_MODE_ALIASED);
+        y = contentTop - scrollOffset;
         for (const InfoPanelSection& section : overlay.infoPanelSections)
         {
             if (y > bottom) break;
@@ -1246,6 +1259,21 @@ struct Renderer::Impl
             }
             y += sectionGap - rowHeight;
         }
+        overlayTarget->PopAxisAlignedClip();
+
+        if (maxScroll > 0.0f)
+        {
+            const float thumbMargin = Scale(4, scale);
+            const float thumbWidth = Scale(3, scale);
+            const float trackHeight = bottom - contentTop;
+            const float thumbHeight = std::max(Scale(24, scale), trackHeight * (visibleHeight / metrics.contentHeight));
+            const float thumbTop = contentTop + (trackHeight - thumbHeight) * (scrollOffset / maxScroll);
+            SetBrush(D2D1::ColorF(0x5A5A5E, 0.85f));
+            overlayTarget->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(clientWidth - thumbMargin - thumbWidth, thumbTop, clientWidth - thumbMargin, thumbTop + thumbHeight),
+                    thumbWidth * 0.5f, thumbWidth * 0.5f),
+                brush.Get());
+        }
     }
 
     static D2D1_RECT_F ToRectF(RECT rect)
@@ -1261,13 +1289,17 @@ struct Renderer::Impl
     {
         const RECT barRectI = chrome.TitleBarRect();
         const float barHeight = static_cast<float>(barRectI.bottom);
-        // Fullscreen: same strip, drawn slightly translucent (matching
-        // DrawBottomBar) so it reads as a floating toolbar over the viewport
-        // rather than the fully opaque, space-reserving windowed title bar.
-        SetBrush(D2D1::ColorF(0x2C2C2E, overlay.isFullscreen ? 0.88f : 1.0f));
-        overlayTarget->FillRectangle(D2D1::RectF(0, 0, clientWidth, barHeight), brush.Get());
-        SetBrush(D2D1::ColorF(0x3A3A3C));
-        overlayTarget->FillRectangle(D2D1::RectF(0, barHeight - 1, clientWidth, barHeight), brush.Get());
+        // Fullscreen: skip the strip's own background/divider entirely (the
+        // buttons/filename below still draw at the same rects, unmoved) so
+        // the grey bar disappears and only its floating controls remain over
+        // the full-bleed viewport, rather than reading as a translucent bar.
+        if (!overlay.isFullscreen)
+        {
+            SetBrush(D2D1::ColorF(0x2C2C2E));
+            overlayTarget->FillRectangle(D2D1::RectF(0, 0, clientWidth, barHeight), brush.Get());
+            SetBrush(D2D1::ColorF(0x3A3A3C));
+            overlayTarget->FillRectangle(D2D1::RectF(0, barHeight - 1, clientWidth, barHeight), brush.Get());
+        }
 
         const std::wstring filename = overlay.filename.empty() ? L"3D Preview" : overlay.filename;
         DrawText(filename, filenameFormat.Get(), ToRectF(chrome.FilenameRect()), D2D1::ColorF(0xF5F5F7),

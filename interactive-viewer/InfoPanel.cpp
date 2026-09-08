@@ -112,3 +112,37 @@ InfoPanelLayout ComputeInfoPanelLayout(int viewportWidth, int viewportHeight,
     layout.bottom = static_cast<float>(viewportHeight - bottomBarHeight);
     return layout;
 }
+
+namespace
+{
+// Kept numerically identical to the header/row/section-gap math in
+// Renderer::DrawInfoPanel (Renderer.cpp) — see that function before changing
+// any of these.
+constexpr float kHeaderTopPad = 18.0f;
+constexpr float kHeaderAdvance = 34.0f;
+constexpr float kRowHeight = 24.0f;
+constexpr float kSectionGap = 18.0f;
+// Extra breathing room after the last row, so scrolling to the end doesn't
+// leave the final label flush against the panel's bottom edge.
+constexpr float kBottomPadding = 16.0f;
+
+float ScaleRound(float value, float dpiScale)
+{
+    return std::round(value * dpiScale);
+}
+}
+
+InfoPanelScrollMetrics ComputeInfoPanelScrollMetrics(
+    const std::vector<InfoPanelSection>& sections, float dpiScale)
+{
+    InfoPanelScrollMetrics metrics;
+    metrics.headerHeight = ScaleRound(kHeaderTopPad, dpiScale) + ScaleRound(kHeaderAdvance, dpiScale);
+    const float rowHeight = ScaleRound(kRowHeight, dpiScale);
+    const float sectionGap = ScaleRound(kSectionGap, dpiScale);
+    for (const InfoPanelSection& section : sections)
+    {
+        metrics.contentHeight += static_cast<float>(section.rows.size()) * rowHeight + sectionGap;
+    }
+    if (!sections.empty()) metrics.contentHeight += ScaleRound(kBottomPadding, dpiScale);
+    return metrics;
+}

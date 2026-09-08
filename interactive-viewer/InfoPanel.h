@@ -47,3 +47,19 @@ struct InfoPanelLayout
 
 InfoPanelLayout ComputeInfoPanelLayout(int viewportWidth, int viewportHeight,
     int titleBarHeight, int bottomBarHeight, float dpiScale);
+
+// Vertical geometry of the scrollable section list Renderer::DrawInfoPanel
+// draws below its fixed "Stats & Shading" header: `headerHeight` is the
+// header's own height (the scrollable area starts right below it),
+// `contentHeight` the full height of every section/row at this DPI. Mirrors
+// DrawInfoPanel's row/section-gap metrics (Renderer.cpp) so the two can't
+// drift apart; used both to draw the scroll-clipped content and to clamp the
+// scroll offset from WM_MOUSEWHEEL (Preview3D.cpp).
+struct InfoPanelScrollMetrics
+{
+    float headerHeight = 0.0f;
+    float contentHeight = 0.0f;
+};
+
+InfoPanelScrollMetrics ComputeInfoPanelScrollMetrics(
+    const std::vector<InfoPanelSection>& sections, float dpiScale);
