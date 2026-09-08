@@ -6,6 +6,7 @@
 // .docs/design/03-file-formats-and-ingestion.md ("Wire format") and
 // .docs/design/02-system-architecture.md (Import worker section).
 
+#include "GenerationLaunchSupport.h"
 #include "SandboxTestSupport.h"
 #include "import_broker/SandboxLauncher.h"
 #include "import_broker/SharedSection.h"
@@ -77,67 +78,6 @@ std::vector<std::byte> BuildMinimalValidSection(uint64_t generationId)
     std::memcpy(section.data(), &header, sizeof(header));
 
     return section;
-}
-
-struct GenerationLaunch {
-    import_broker::SandboxProcess proc;
-    platform::Win32Handle controlInWrite; // host writes StartGenerationRequest here
-    platform::Win32Handle controlOutRead; // host reads ChunksReady/GenerationError here
-};
-
-// Launches the real worker in --generate mode, wiring a request pipe
-// (host->worker, worker's stdin) and a notice pipe (worker->host, worker's
-// stdout) plus the given shared-section handle, all via the same
-// PROC_THREAD_ATTRIBUTE_HANDLE_LIST restricted-inheritance mechanism the
-// launch spike already proved.
-std::optional<GenerationLaunch> LaunchGenerationWorker(const platform::AppContainerSid& sid,
-                                                        HANDLE sectionHandle)
-{
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    sa.lpSecurityDescriptor = nullptr;
-
-    HANDLE inReadRaw = nullptr;
-    HANDLE inWriteRaw = nullptr;
-    if (!CreatePipe(&inReadRaw, &inWriteRaw, &sa, 0)) {
-        return std::nullopt;
-    }
-    platform::Win32Handle controlInRead(inReadRaw);
-    platform::Win32Handle controlInWrite(inWriteRaw);
-    SetHandleInformation(controlInWrite.get(), HANDLE_FLAG_INHERIT, 0);
-
-    HANDLE outReadRaw = nullptr;
-    HANDLE outWriteRaw = nullptr;
-    if (!CreatePipe(&outReadRaw, &outWriteRaw, &sa, 0)) {
-        return std::nullopt;
-    }
-    platform::Win32Handle controlOutRead(outReadRaw);
-    platform::Win32Handle controlOutWrite(outWriteRaw);
-    SetHandleInformation(controlOutRead.get(), HANDLE_FLAG_INHERIT, 0);
-
-    std::vector<HANDLE> inherited{ controlInRead.get(), controlOutWrite.get(), sectionHandle };
-    std::wstring cmdLine
-        = L"\"" + std::wstring(sandbox_test_support::WorkerExePath()) + L"\" --generate";
-
-    import_broker::SandboxLimits limits{};
-    auto proc = import_broker::LaunchSuspendedSandboxed(
-        sandbox_test_support::WorkerExePath(), cmdLine, inherited, controlOutWrite.get(), limits,
-        sid, controlInRead.get());
-    if (!proc) {
-        return std::nullopt;
-    }
-
-    // The parent no longer needs its own copies of the ends it handed to the
-    // child.
-    controlInRead.reset();
-    controlOutWrite.reset();
-
-    GenerationLaunch launch;
-    launch.proc = std::move(*proc);
-    launch.controlInWrite = std::move(controlInWrite);
-    launch.controlOutRead = std::move(controlOutRead);
-    return launch;
 }
 
 } // namespace
@@ -222,7 +162,8 @@ TEST_CASE("Real worker launched with --generate produces a section whose header 
     auto section = import_broker::CreateSharedSection(import_broker::kSyntheticSectionBytes);
     REQUIRE(section);
 
-    auto launch = LaunchGenerationWorker(fixture.sid, section.get());
+    auto launch = generation_launch_support::LaunchWorkerWithControlChannel(
+        sandbox_test_support::WorkerExePath(), L"--generate", fixture.sid, section.get());
     REQUIRE(launch.has_value());
     REQUIRE(import_broker::ResumeSandboxProcess(launch->proc));
 
@@ -267,7 +208,8 @@ TEST_CASE("Real worker's synthetic cube+point-cluster generation validates and c
     auto section = import_broker::CreateSharedSection(import_broker::kSyntheticSectionBytes);
     REQUIRE(section);
 
-    auto launch = LaunchGenerationWorker(fixture.sid, section.get());
+    auto launch = generation_launch_support::LaunchWorkerWithControlChannel(
+        sandbox_test_support::WorkerExePath(), L"--generate", fixture.sid, section.get());
     REQUIRE(launch.has_value());
     REQUIRE(import_broker::ResumeSandboxProcess(launch->proc));
 
@@ -347,7 +289,8 @@ TEST_CASE("Real worker reports ResourceLimit when the section is too small for t
     auto section = import_broker::CreateSharedSection(kTooSmall);
     REQUIRE(section);
 
-    auto launch = LaunchGenerationWorker(fixture.sid, section.get());
+    auto launch = generation_launch_support::LaunchWorkerWithControlChannel(
+        sandbox_test_support::WorkerExePath(), L"--generate", fixture.sid, section.get());
     REQUIRE(launch.has_value());
     REQUIRE(import_broker::ResumeSandboxProcess(launch->proc));
 

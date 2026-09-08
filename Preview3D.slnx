@@ -8,5 +8,6 @@
   <Project Path="compatibility-host/Preview3DImportHost.vcxproj" Id="87ceca17-a6bd-45fb-84a9-9a5e9f4a793c" />
   <Project Path="shared/model-core/ModelCore.vcxproj" Id="a1edc11c-012d-46db-ad8c-763723bfd340" />
   <Project Path="tests/unit/Tests.Unit.vcxproj" Id="286cbb0d-2cac-45fe-88bb-55383e3632d3" />
+  <Project Path="tests/hostile-worker/Preview3DHostileWorker.vcxproj" Id="41213d60-a737-46f9-8251-2e54234ed2b1" />
   <Project Path="tests/import-isolation/Tests.ImportIsolation.vcxproj" Id="22fff45c-3a1a-45a4-86cc-c8966db2b435" />
 </Solution>

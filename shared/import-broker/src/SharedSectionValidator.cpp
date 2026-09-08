@@ -87,9 +87,20 @@ ValidationResult ValidateAndCopySection(std::span<const std::byte> sectionView,
         return Reject(ImportErrorCode::MalformedData, "descriptor table exceeds sectionLength");
     }
 
+    // 9.5. Bulk-copy the entire live section into host-owned private memory
+    // in ONE read, now that [0, header.sectionLength) is provably within
+    // sectionView (checks 5+6+9 above). sectionView is adversary-writable
+    // for as long as the caller keeps it mapped; every check and copy from
+    // this point on reads only this private snapshot, never sectionView
+    // again -- eliminating the TOCTOU window between "checked something"
+    // and "read it again to copy/verify it."
+    std::vector<std::byte> sectionCopy(sectionView.begin(),
+                                        sectionView.begin() + header.sectionLength);
+    std::span<const std::byte> section(sectionCopy);
+
     // 10. Recompute the section checksum over [header, sectionLength).
-    auto payloadRegion = sectionView.subspan(sizeof(SectionHeader),
-                                              header.sectionLength - sizeof(SectionHeader));
+    auto payloadRegion
+        = section.subspan(sizeof(SectionHeader), header.sectionLength - sizeof(SectionHeader));
     uint64_t recomputedChecksum = Fnv1a64(payloadRegion);
     if (recomputedChecksum != header.sectionChecksum) {
         return Reject(ImportErrorCode::MalformedData, "section checksum mismatch");
@@ -108,7 +119,7 @@ ValidationResult ValidateAndCopySection(std::span<const std::byte> sectionView,
 
         // 12a. Copy this descriptor into a local, private copy.
         ChunkDescriptor descriptor{};
-        std::memcpy(&descriptor, sectionView.data() + descriptorOffset, sizeof(descriptor));
+        std::memcpy(&descriptor, section.data() + descriptorOffset, sizeof(descriptor));
 
         // 12b.
         auto payloadEnd = CheckedAdd(descriptor.normalizedRangeOffset, descriptor.byteSize);
@@ -173,7 +184,7 @@ ValidationResult ValidateAndCopySection(std::span<const std::byte> sectionView,
         // 12h. Recompute the per-chunk checksum over the validated payload
         // range.
         auto chunkPayloadView
-            = sectionView.subspan(descriptor.normalizedRangeOffset, descriptor.byteSize);
+            = section.subspan(descriptor.normalizedRangeOffset, descriptor.byteSize);
         uint64_t recomputedChunkChecksum = Fnv1a64(chunkPayloadView);
         if (recomputedChunkChecksum != descriptor.chunkChecksum) {
             return Reject(ImportErrorCode::MalformedData, "chunk checksum mismatch");

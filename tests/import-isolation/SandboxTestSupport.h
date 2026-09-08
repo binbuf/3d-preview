@@ -1,9 +1,10 @@
 #pragma once
 
-// Shared test fixtures for launching the real Preview3DImportWorker.exe
-// under a throwaway AppContainer profile, used by both SandboxLaunchTests.cpp
-// (the AppContainer/Job Object launch spike) and ImportPipelineTests.cpp
-// (the wire-format/broker-protocol data path).
+// Shared test fixtures for launching the real Preview3DImportWorker.exe (or
+// the synthetic Preview3DHostileWorker.exe) under a throwaway AppContainer
+// profile, used by SandboxLaunchTests.cpp (the AppContainer/Job Object
+// launch spike), ImportPipelineTests.cpp (the wire-format/broker-protocol
+// data path), and HostileWorkerTests.cpp (the adversarial suite).
 
 #include "platform/AppContainerSid.h"
 
@@ -17,11 +18,20 @@
 #error "PREVIEW3D_IMPORT_WORKER_EXE must be defined by Tests.ImportIsolation.vcxproj"
 #endif
 
+#ifndef PREVIEW3D_HOSTILE_WORKER_EXE
+#error "PREVIEW3D_HOSTILE_WORKER_EXE must be defined by Tests.ImportIsolation.vcxproj"
+#endif
+
 namespace sandbox_test_support {
 
 inline const wchar_t* WorkerExePath()
 {
     return PREVIEW3D_IMPORT_WORKER_EXE;
+}
+
+inline const wchar_t* HostileWorkerExePath()
+{
+    return PREVIEW3D_HOSTILE_WORKER_EXE;
 }
 
 // Grants ALL APPLICATION PACKAGES / ALL RESTRICTED APPLICATION PACKAGES

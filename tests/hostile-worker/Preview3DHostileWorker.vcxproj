@@ -13,11 +13,17 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{22fff45c-3a1a-45a4-86cc-c8966db2b435}</ProjectGuid>
-    <RootNamespace>TestsImportIsolation</RootNamespace>
-  </PropertyGroup>
-  <PropertyGroup Label="Vcpkg">
-    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <ProjectGuid>{41213d60-a737-46f9-8251-2e54234ed2b1}</ProjectGuid>
+    <RootNamespace>Preview3DHostileWorker</RootNamespace>
+    <!-- Synthetic hostile-worker attack binary for the Gate 2 containment
+         suite (see .docs/design/10-delivery-plan.md). Never shipped; it
+         exists only as deliberately-misbehaving adversarial input consumed
+         by Tests.ImportIsolation.exe. IsHostileTestBinary must be set here,
+         in the same Globals block that appears before the
+         Microsoft.Cpp.Default.props import below, because
+         Directory.Build.props's TreatWarningAsError condition is evaluated
+         at that import's position. -->
+    <IsHostileTestBinary>true</IsHostileTestBinary>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
@@ -43,17 +49,11 @@
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\shared\platform\include;..\..\shared\import-broker\include;..\..\shared\model-core\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <!-- Every project in this solution shares one centralized output
-           directory, $(SolutionDir)$(Platform)\$(Configuration)\ (confirmed
-           by inspecting an actual solution build, not assumed). There is no
-           per-project "import-worker\x64\Debug\" subdirectory. -->
-      <PreprocessorDefinitions>PREVIEW3D_IMPORT_WORKER_EXE=LR"($(SolutionDir)$(Platform)\$(Configuration)\Preview3DImportWorker.exe)";PREVIEW3D_HOSTILE_WORKER_EXE=LR"($(SolutionDir)$(Platform)\$(Configuration)\Preview3DHostileWorker.exe)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\import-worker\src;..\..\shared\platform\include;..\..\shared\model-core\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>userenv.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -69,47 +69,22 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="HarnessSmokeTests.cpp" />
-    <ClCompile Include="SandboxLaunchTests.cpp" />
-    <ClCompile Include="ImportPipelineTests.cpp" />
-    <ClCompile Include="HostileWorkerTests.cpp" />
-    <ClCompile Include="..\..\shared\platform\src\AppContainerSid.cpp" />
-    <ClCompile Include="..\..\shared\platform\src\ProcThreadAttributeList.cpp" />
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\AttackModes.cpp" />
+    <ClCompile Include="..\..\import-worker\src\SyntheticSceneGenerator.cpp" />
     <ClCompile Include="..\..\shared\platform\src\MappedView.cpp" />
-    <ClCompile Include="..\..\shared\import-broker\src\SandboxLauncher.cpp" />
-    <ClCompile Include="..\..\shared\import-broker\src\SharedSection.cpp" />
-    <ClCompile Include="..\..\shared\import-broker\src\SharedSectionValidator.cpp" />
     <ClCompile Include="..\..\shared\model-core\src\ControlChannelIo.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="SandboxTestSupport.h" />
-    <ClInclude Include="GenerationLaunchSupport.h" />
-    <ClInclude Include="..\..\shared\platform\include\platform\Win32Handle.h" />
-    <ClInclude Include="..\..\shared\platform\include\platform\AppContainerSid.h" />
-    <ClInclude Include="..\..\shared\platform\include\platform\ProcThreadAttributeList.h" />
+    <ClInclude Include="src\AttackModes.h" />
+    <ClInclude Include="..\..\import-worker\src\SyntheticSceneGenerator.h" />
     <ClInclude Include="..\..\shared\platform\include\platform\MappedView.h" />
-    <ClInclude Include="..\..\shared\platform\include\platform\CheckedMath.h" />
-    <ClInclude Include="..\..\shared\import-broker\include\import_broker\SandboxLauncher.h" />
-    <ClInclude Include="..\..\shared\import-broker\include\import_broker\SharedSection.h" />
-    <ClInclude Include="..\..\shared\import-broker\include\import_broker\SharedSectionValidator.h" />
     <ClInclude Include="..\..\shared\model-core\include\model_core\WireFormat.h" />
     <ClInclude Include="..\..\shared\model-core\include\model_core\VertexLayouts.h" />
     <ClInclude Include="..\..\shared\model-core\include\model_core\Checksum.h" />
     <ClInclude Include="..\..\shared\model-core\include\model_core\ImportError.h" />
     <ClInclude Include="..\..\shared\model-core\include\model_core\ControlProtocol.h" />
     <ClInclude Include="..\..\shared\model-core\include\model_core\ControlChannelIo.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <!-- Build-order only (exe to exe, nothing to link): the test needs
-         Preview3DImportWorker.exe built and up to date before it runs. -->
-    <ProjectReference Include="..\..\import-worker\Preview3DImportWorker.vcxproj">
-      <Project>{499d3a16-e218-49e5-accd-caf92709f242}</Project>
-      <LinkLibraryDependencies>false</LinkLibraryDependencies>
-    </ProjectReference>
-    <ProjectReference Include="..\..\tests\hostile-worker\Preview3DHostileWorker.vcxproj">
-      <Project>{41213d60-a737-46f9-8251-2e54234ed2b1}</Project>
-      <LinkLibraryDependencies>false</LinkLibraryDependencies>
-    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
