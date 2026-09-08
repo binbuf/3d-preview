@@ -25,7 +25,7 @@ Release payload:
 - Preview3D.exe;
 - Preview3DImportWorker.exe plus fastgltf, the product STL/PLY parsers, ufbx, lib3mf, TinyUSDZ, the pinned Draco decoder, KTX/Basis transcoder, libwebp, DirectXTex/WIC, and meshoptimizer — every general-format parser/decoder the product ships, none of which is present in Preview3D.exe's own binary;
 - Preview3DImportHost.exe plus the exact signed app-local OpenUSD libraries and release-manifest-hashed resources required by its minimal host build;
-- Preview3DThumbnail.dll;
+- Preview3DThumbnailProvider.dll;
 - license/third-party notices;
 - optional local documentation and uninstaller metadata.
 
@@ -95,7 +95,7 @@ The CLSIDs and family mapping in [05-thumbnail-provider.md](./05-thumbnail-provi
     CLSID\{family-clsid}\
       (Default) = "3D Preview <family> Thumbnail Provider"
       InprocServer32\
-        (Default) = "[INSTALLFOLDER]Preview3DThumbnail.dll"
+        (Default) = "[INSTALLFOLDER]Preview3DThumbnailProvider.dll"
         ThreadingModel = "Apartment"
 
 For each direct extension:

@@ -52,7 +52,7 @@ One root solution references:
 
 - ModelCore static library with format-independent normalized-scene/wire-format contracts, and its format adapters (linked only by the two AppContainer import executables, never by the viewer or thumbnail DLL's own copies);
 - Preview3D Windows subsystem executable, zero-capability AppContainer Preview3DImportWorker executable (general formats), and zero-capability AppContainer Preview3DImportHost executable (OpenUSD);
-- Preview3DThumbnail COM DLL;
+- Preview3DThumbnailProvider COM DLL;
 - unit, headless adapter, cache, import-broker (worker + host), rendering, IPC, COM, fuzz, and performance executables;
 - installer projects.
 

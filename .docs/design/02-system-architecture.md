@@ -223,7 +223,7 @@ interactive-viewer/
   Preview3D.vcxproj
 thumbnail-provider/
   src/                              COM provider and CPU rasterizer
-  ThumbnailProvider3D.vcxproj
+  Preview3DThumbnailProvider.vcxproj
 installer/                          WiX project/registration
 tests/
   unit/                             core/platform/graphics/COM unit tests
