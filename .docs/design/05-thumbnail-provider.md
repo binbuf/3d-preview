@@ -29,6 +29,8 @@ Distinct CLSIDs let the factory select an adapter without sniffing every grammar
 
 Each class is registered as an InprocServer32 with ThreadingModel=Apartment and attached to the extension's ShellEx thumbnail-handler GUID. The MSI writes these machine-level registrations; users remain in control of default open applications.
 
+Registering a handler as InprocServer32 is necessary for Explorer to load it, but it is not what isolates it: by default the Shell loads thumbnail/preview handlers into an isolated per-handler surrogate process (`prevhost.exe`/the thumbnail surrogate) rather than into `explorer.exe` itself, and that surrogate process boundary — not apartment threading, not the COM contract — is what contains a parser crash inside this DLL away from Explorer. The installer, its registry entries, and any troubleshooting documentation MUST NOT set `DisableProcessIsolation=1` (or an equivalent per-handler opt-out) for any of the seven CLSIDs above, in the MSI or in support guidance. A future change that enables in-process (`explorer.exe`-hosted) execution for performance reasons requires a new ADR, a revised threat model in [09-quality-performance-and-security.md](./09-quality-performance-and-security.md), and re-justifying every claim in this document that currently depends on Shell process isolation.
+
 ## Call contract
 
 Initialize:
@@ -105,7 +107,8 @@ The DLL is treated as hostile-input code executing in a sensitive host:
 - compile with /guard:cf, /CETCOMPAT, /DYNAMICBASE, /NXCOMPAT, /sdl, and high warning level;
 - use checked integer/range helpers at every file-derived allocation or offset;
 - disable parser callbacks that open paths, URLs, plug-ins, scripts, codecs, or environment-selected resources;
-- never start or communicate with the OpenUSD compatibility host and never read the viewer's persistent derived cache;
+- never start or communicate with the OpenUSD compatibility host, the general import worker, or the viewer, and never read the viewer's persistent derived cache;
+- rely on Shell's default out-of-process surrogate hosting as the actual crash-containment boundary (see COM classes and extension assignment above); the compile-time hardening flags below reduce what a crash can do, they do not replace process isolation;
 - place third-party parser calls behind exception and structured-exception containment at the COM boundary where legally safe, while fixing ordinary memory faults rather than masking them;
 - write no model-derived persistent cache;
 - keep diagnostic events path-redacted and disabled unless troubleshooting is enabled.
@@ -135,5 +138,6 @@ Explorer is allowed to fall back to the generic icon. Returning a fabricated “
 - Truncation, archive bomb, adversarial count, non-seekable stream, timeout, OOM injection, and fuzz corpora.
 - Repeated Explorer surrogate load/unload with GDI/User handle and private-byte leak checks.
 - Verification in the actual Windows thumbnail surrogate at 100%, 150%, and 200% DPI.
+- Post-install verification, on a clean machine, that each registered CLSID is actually loaded into the isolated surrogate process (not `explorer.exe`) and that no installed registry value sets `DisableProcessIsolation`; this is a release-blocking check, not an optional audit.
 
 Primary references: [Thumbnail provider guidance](https://learn.microsoft.com/windows/win32/shell/thumbnail-providers), [IInitializeWithStream](https://learn.microsoft.com/windows/win32/api/propsys/nn-propsys-iinitializewithstream), and [IThumbnailProvider::GetThumbnail](https://learn.microsoft.com/windows/win32/api/thumbcache/nf-thumbcache-ithumbnailprovider-getthumbnail).

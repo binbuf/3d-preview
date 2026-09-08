@@ -2,7 +2,7 @@
 
 ## Goals
 
-The renderer must keep accepting input and presenting frames while cache validation, CPU import, compatibility-host work, PCIe transfer, shader-visible publication, LOD selection, and eviction happen concurrently. It must also render a useful approximation when the full model is larger than available video memory and exploit verified derived data on repeat opens without trusting it implicitly.
+The renderer must keep accepting input and presenting frames while cache validation, CPU import (now brokered to the AppContainer import worker and, for USD composition, the compatibility host), PCIe transfer, shader-visible publication, LOD selection, and eviction happen concurrently. It must also render a useful approximation when the full model is larger than available video memory and exploit verified derived data on repeat opens without trusting it implicitly.
 
 “Asynchronous” means there is no UI-thread or render-thread wait for a loading resource. It does not mean every adapter or machine has a physically independent DMA engine.
 
@@ -64,6 +64,12 @@ The MVP uses a forward, rasterized PBR-lite pipeline:
 - MSAA disabled by default; temporal effects, ray tracing, mesh shaders, shadows, and post-process antialiasing are outside the MVP.
 
 Materials are flattened into fixed-size GPU records. Feature level 11_0-compatible descriptor tables are used instead of assuming resource binding tier 3 or shader model 6.6 bindless behavior. Missing resources point at permanent neutral descriptors.
+
+Direct descriptor-heap indexing ("bindless") requires both shader model 6.6 and resource binding tier 3, which the MVP's feature-level-11_0 floor does not guarantee. Descriptor tables are therefore the baseline rendering path for the life of the MVP, not a placeholder pending a bindless rewrite; a bindless path may be added later strictly as an optional, separately gated capability tier behind a runtime feature check, evaluated on its own performance evidence rather than adopted as a wholesale replacement.
+
+Per-frame camera/pass data (view-projection, camera-relative origin, lighting) is bound through a per-frame constant buffer view — a root CBV or a root-signature-referenced table entry — not packed into inline root constants. Root signatures have a hard 64-DWORD budget and materially less native fast storage on typical hardware; root constants are reserved for small, genuinely per-draw values such as a material/instance/draw ID, not for data that is naturally a buffer.
+
+The normalized-chunk vertex layout is a small, closed, product-enumerated set of explicit layouts (at minimum: a position-only layout for point clouds, a position+normal+UV layout for untextured/simple meshes, and a full PBR layout with tangents/vertex color for textured meshes), each with a stable numeric layout ID carried on the chunk descriptor. It is not one universal fixed-size vertex record that every format's normalizer is forced into: a struct sized to fit worst-case data (as in the advisor's illustrative 32-byte sample, whose declared members total 28 bytes and only reach 32 through tail padding, and whose UV field is full float2 rather than half-precision) wastes bandwidth on the common case and still cannot represent every source faithfully. Adding a layout to the enumeration is a normal chunk-schema change reviewed like any other in [03-file-formats-and-ingestion.md](./03-file-formats-and-ingestion.md); it is not a reason to add a second universal struct.
 
 CPU frustum culling operates on cluster bounds. Draws are grouped by pipeline/material and compatible instances are batched. When measured visible draw count or CPU submission time crosses the Gate-3 threshold, a feature-level-11-compatible `ExecuteIndirect` path consumes product-generated commands after CPU cluster culling; the ordinary direct-draw path remains the correctness fallback. GPU occlusion culling and mesh shaders remain deferred. The normalized cluster size bounds CPU work in either path.
 
@@ -139,7 +145,9 @@ The reserved set contains swap-chain/depth resources, pipeline assets, permanent
 
 If the reserved set itself cannot fit with headroom, the renderer lowers proxy density and texture resolution. It never treats CreateCommittedResource success as evidence that future allocations are safe.
 
-Fine chunks use an LRU weighted by visible recency, projected error, re-import cost, and dependency sharing. Eviction removes a chunk from a new snapshot first, waits only in deferred retirement for the last direct fence, and then releases or uses explicit heap residency APIs where profiling justifies them. The MVP may use D3D12 Memory Allocator for suballocation and budget telemetry, but its policy remains product-owned.
+Fine chunks use an LRU weighted by visible recency, projected error, re-import cost, and dependency sharing. Eviction removes a chunk from a new snapshot first, waits only in deferred retirement for the last direct fence, and then releases or uses explicit heap residency APIs where profiling justifies them. The MVP uses D3D12 Memory Allocator (D3D12MA) for suballocation and budget telemetry, but its policy remains product-owned.
+
+D3D12MA is configured as one device-wide allocator instance, not one physical DEFAULT heap: it intentionally manages a pool of separate heaps and must keep buffers, render-target/depth-stencil resources, and small vs. large textures in distinct heaps on Resource Heap Tier 1 hardware, where mixing resource categories in one heap is not supported. "One allocator" describes the object the renderer talks to, not a claim that model geometry, textures, and target resources ever share underlying heap memory.
 
 The system does not promise full-detail simultaneous residency for an 8 GiB source. Its contract is a stable proxy plus view-prioritized refinement.
 
@@ -187,7 +195,7 @@ Developer builds assert queue ownership, generation identity, legal resource-sta
 
 - parse/decode/normalize/simplify/upload bytes and durations;
 - derived-cache lookup/validation/write bytes, hit/miss reason, eviction, and warm-open milestones;
-- compatibility-host start, brokered bytes, shared-section validation, peak commit, cancellation, and exit reason;
+- import-worker and compatibility-host start, brokered bytes, shared-section validation, peak commit, cancellation, and exit reason;
 - ring occupancy/backpressure and copy batch sizes;
 - fence submission/completion latency;
 - per-frame CPU time, GPU time, present result, and queue wait source;
@@ -197,4 +205,4 @@ Developer builds assert queue ownership, generation identity, legal resource-sta
 
 Release logging contains no model data or full paths by default.
 
-Primary references: [D3D12 fence-based resource management](https://learn.microsoft.com/windows/win32/direct3d12/fence-based-resource-management), [resource barriers](https://learn.microsoft.com/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states-in-direct3d-12), [multi-engine synchronization](https://learn.microsoft.com/windows/win32/direct3d12/user-mode-heap-synchronization), and [DXGI video-memory reservation](https://learn.microsoft.com/windows/win32/direct3d12/residency).
+Primary references: [D3D12 fence-based resource management](https://learn.microsoft.com/windows/win32/direct3d12/fence-based-resource-management), [resource barriers](https://learn.microsoft.com/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states-in-direct3d-12), [multi-engine synchronization](https://learn.microsoft.com/windows/win32/direct3d12/user-mode-heap-synchronization), [DXGI video-memory reservation](https://learn.microsoft.com/windows/win32/direct3d12/residency), [D3D12 root signature limits](https://learn.microsoft.com/windows/win32/direct3d12/root-signature-limits), [DirectX shader model 6.6 dynamic resources](https://microsoft.github.io/DirectX-Specs/d3d/HLSL_SM_6_6_DynamicResources.html), and [D3D12 Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator).

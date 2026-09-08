@@ -18,13 +18,13 @@ Consequence: the product owns native window chrome, accessibility, layout/overla
 
 **Status:** Accepted.
 
-The UI thread owns only HWND/message/input/AppState. The render thread owns swap-chain presentation and the direct queue. One upload coordinator owns copy submission/ring retirement. A bounded adaptive worker pool owns cache/mapping/parsing/normalization/LOD/texture CPU work. A loader-owned broker exclusively controls the optional compatibility-host process and its shared sections.
+The UI thread owns only HWND/message/input/AppState. The render thread owns swap-chain presentation and the direct queue. One upload coordinator owns copy submission/ring retirement. A bounded adaptive worker pool inside the trusted process owns cache validation, file-handle/mapping setup for handles it will duplicate outward, chunk-descriptor copy/validation, and LOD/residency scheduling — not third-party parsing (see [ADR-014](#adr-014-appcontainer-import-processes-are-the-parser-security-boundary-not-threads)). A loader-owned broker exclusively controls the import-worker and compatibility-host processes and their shared sections.
 
-Reason: moving parsing off the UI thread is insufficient if Present, resizing, default-heap allocation, or a queue wait can still block it. Exclusive queue/list ownership also makes fence lifetime auditable.
+Reason: moving parsing off the UI thread is insufficient if Present, resizing, default-heap allocation, or a queue wait can still block it. Exclusive queue/list ownership also makes fence lifetime auditable. Separately, moving parsing off any thread of the trusted process — not just the UI thread — is necessary because a background thread shares the process's address space, window, and GPU device with everything else the user has open; see ADR-014.
 
 Consequence: cross-lane communication uses bounded value/handle queues and immutable snapshots. Some additional latency of one frame is preferable to shared mutable scene state.
 
-Rejected: running Present in the UI message pump; permitting arbitrary workers to record/submit copy lists; one coarse global mutex around a mutable scene.
+Rejected: running Present in the UI message pump; permitting arbitrary workers to record/submit copy lists; one coarse global mutex around a mutable scene; treating a background thread inside the trusted process as sufficient containment for a parser.
 
 ## ADR-003 — mapped input is a bounded I/O primitive, not a zero-memory promise
 
@@ -80,9 +80,9 @@ Rejected for MVP: fail when full geometry does not fit; automatic whole-model do
 
 Reason: no single broad importer has the best performance, limits, fidelity, dependency weight, and attack surface for every format.
 
-Consequence: Model Core owns one adapter contract and consistent budgets/errors. Library-native objects and exceptions do not cross it. OpenUSD objects do not cross the process boundary. Each dependency gets its own fuzz/conformance gate, and compressed payloads have decoded-size limits independent of source size.
+Consequence: Model Core owns one adapter contract and consistent budgets/errors. Library-native objects and exceptions do not cross it. None of these libraries link into the trusted viewer process at all: every one of them, including the "fast path" adapters and meshoptimizer, links only into `Preview3DImportWorker.exe`, and OpenUSD links only into `Preview3DImportHost.exe`. Neither set of objects crosses either process boundary — only the normalized wire-format chunks in [03-file-formats-and-ingestion.md](./03-file-formats-and-ingestion.md) do. Each dependency gets its own fuzz/conformance gate, and compressed payloads have decoded-size limits independent of source size.
 
-Rejected: Assimp as a universal runtime importer; Autodesk FBX SDK due package/redistribution/weight concerns; loading OpenUSD into the viewer or thumbnail provider; using arbitrary installed WIC codecs.
+Rejected: Assimp as a universal runtime importer; Autodesk FBX SDK due package/redistribution/weight concerns; loading OpenUSD into the viewer or thumbnail provider; using arbitrary installed WIC codecs; loading any of these libraries directly into the trusted viewer process on the theory that a background thread is isolation enough (see [ADR-014](#adr-014-appcontainer-import-processes-are-the-parser-security-boundary-not-threads)).
 
 Primary upstream references: [fastgltf](https://github.com/spnda/fastgltf), [Google Draco](https://github.com/google/draco), [KTX-Software](https://github.com/KhronosGroup/KTX-Software), [ufbx](https://github.com/ufbx/ufbx), [lib3mf](https://github.com/3MFConsortium/lib3mf), [TinyUSDZ](https://github.com/lighttransport/tinyusdz), [OpenUSD](https://openusd.org/release/), [DirectXTex](https://github.com/microsoft/DirectXTex), [meshoptimizer](https://github.com/zeux/meshoptimizer), and [D3D12 Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator).
 
@@ -90,13 +90,13 @@ Primary upstream references: [fastgltf](https://github.com/spnda/fastgltf), [Goo
 
 **Status:** Accepted.
 
-The in-process COM provider renders a deterministic, sampled mesh/point-cloud thumbnail on the CPU and creates no D3D device. It may use the strictly bounded in-process decoders but never starts the OpenUSD compatibility host or accesses the viewer cache.
+The in-process COM provider renders a deterministic, sampled mesh/point-cloud thumbnail on the CPU and creates no D3D device. It may use the strictly bounded in-process decoders but never starts the import worker, the OpenUSD compatibility host, or accesses the viewer cache. It relies on Shell's default policy of loading thumbnail handlers into an isolated per-handler surrogate process, not into `explorer.exe`, as its actual crash-containment boundary; the installer MUST NOT set `DisableProcessIsolation` for any of its CLSIDs.
 
-Reason: driver/device creation and asynchronous GPU lifetime inside Explorer's surrogate add failure modes disproportionate to a small thumbnail. CPU sampling has a clear deadline and memory cap.
+Reason: driver/device creation and asynchronous GPU lifetime inside Explorer's surrogate add failure modes disproportionate to a small thumbnail. CPU sampling has a clear deadline and memory cap. Running in-process (registered as InprocServer32) inside the Shell's surrogate, rather than inside `explorer.exe` itself, is what makes an unavoidable parser bug survivable — the same reasoning as ADR-014, applied to a process the product does not own.
 
-Consequence: thumbnail shading is an approximation and external sidecars are unavailable through IInitializeWithStream. Explorer may show a generic icon when safe bounded import is impossible.
+Consequence: thumbnail shading is an approximation and external sidecars are unavailable through IInitializeWithStream. Explorer may show a generic icon when safe bounded import is impossible. Release verification includes confirming, on a clean install, that each CLSID actually loads into the surrogate and that isolation was not disabled.
 
-Rejected: launching the viewer to capture a frame; IPC to a background renderer; GPU creation within the provider; reading arbitrary siblings based on untrusted embedded paths.
+Rejected: launching the viewer to capture a frame; IPC to a background renderer; GPU creation within the provider; reading arbitrary siblings based on untrusted embedded paths; disabling Shell's process isolation for this handler for any performance reason.
 
 ## ADR-008 — no warm daemon or tray
 
@@ -116,11 +116,11 @@ Rejected: hide-on-close, start-at-login, system tray exit menu, helper launcher 
 
 The MVP targets Windows 11's system D3D12/DXGI runtime and hardware feature level 11_0 or newer. It uses conservative descriptor tables and offline DXC shaders.
 
-Reason: this covers the target OS without shipping an additional runtime contract, and it avoids making bindless/mesh-shader-era hardware a minimum requirement.
+Reason: this covers the target OS without shipping an additional runtime contract, and it avoids making bindless/mesh-shader-era hardware a minimum requirement. Direct descriptor-heap indexing needs both shader model 6.6 and resource binding tier 3, neither of which feature level 11_0 guarantees, so descriptor tables are the correct baseline rather than a stopgap.
 
-Consequence: modern features that require the Agility SDK or later binding tiers are not assumed. A later feature need can revisit packaging with a new ADR.
+Consequence: modern features that require the Agility SDK or later binding tiers are not assumed. Descriptor tables remain the rendering baseline for the life of the MVP; an optional bindless capability tier behind a runtime feature check is a possible later addition evaluated on its own performance evidence, not a planned replacement. A later feature need can revisit packaging with a new ADR. Per-frame camera/pass data goes through a per-frame CBV, with root constants reserved for small per-draw IDs given the 64-DWORD root-signature budget; the normalized-chunk vertex layout is a small closed enumeration of explicit layouts rather than one universal fixed-size struct (see [04-rendering-and-streaming.md](./04-rendering-and-streaming.md)). D3D12MA is one device-wide allocator instance but manages multiple underlying DEFAULT heaps segregated by resource class, as Resource Heap Tier 1 hardware requires.
 
-Rejected for MVP: automatic WARP user fallback; Agility SDK solely for novelty; D3D11 primary renderer.
+Rejected for MVP: automatic WARP user fallback; Agility SDK solely for novelty; D3D11 primary renderer; adopting bindless resource access as the baseline path; one physical DEFAULT heap for every resource class; packing per-frame camera/pass data into root constants; a single universal vertex struct sized for the worst-case format.
 
 ## ADR-010 — D3D11On12/Direct2D for compact overlays
 
@@ -158,17 +158,29 @@ Consequence: the viewer owns up to a 10 GiB soft-cap of renderable model-derived
 
 Rejected: an unbounded cache; storing original source bytes or full paths/names; sharing writable cache state with Explorer; trusting cache records because the current user owns them; deleting arbitrary user-profile data from elevated MSI code.
 
-## ADR-013 — hybrid USD import with an AppContainer compatibility host
+## ADR-013 — hybrid USD import with a second, heavier AppContainer host
 
-**Status:** Accepted for the revised MVP.
+**Status:** Accepted for the revised MVP; superseded in scope by [ADR-014](#adr-014-appcontainer-import-processes-are-the-parser-security-boundary-not-threads), which makes AppContainer isolation the rule for every parser rather than an OpenUSD-specific exception.
 
-TinyUSDZ remains the in-process common-static fast path. A typed unsupported-composition result may start `Preview3DImportHost.exe`, which links pinned OpenUSD, runs under a zero-capability AppContainer token in a kill-on-close Job Object, resolves only parent-brokered read-only local assets, and returns bounded normalized chunks through revalidated shared sections.
+TinyUSDZ remains the common-static fast path, but it now runs inside `Preview3DImportWorker.exe` alongside every other format adapter rather than in-process in the viewer. A typed unsupported-composition result from the worker may start the separate `Preview3DImportHost.exe`, which links pinned OpenUSD, runs under a zero-capability AppContainer token in a kill-on-close Job Object, resolves only parent-brokered read-only local assets, and returns bounded normalized chunks through revalidated shared sections using the same broker protocol as the worker.
 
-Reason: generic USD claims are not credible with the TinyUSDZ subset alone, while loading the full OpenUSD stack into the viewer would increase startup weight, plug-in/path authority, memory, and crash impact for every format.
+Reason: generic USD claims are not credible with the TinyUSDZ subset alone, while loading the full OpenUSD stack into the same process as every other format adapter would increase startup weight, plug-in/path authority, memory, and crash impact for every format, not just USD. Keeping it a separate executable rather than folding it into `Preview3DImportWorker.exe` keeps the worker's steady-state footprint small for the common case.
 
-Consequence: the installed product gains another signed executable and app-local dependency payload, a security protocol boundary, process/job lifecycle, and a second USD conformance path. The host is lazy and nonpersistent; a failure affects only the current document. USD remains a documented static preview subset rather than complete authoring fidelity.
+Consequence: the installed product gains a second signed executable and app-local dependency payload beyond the general import worker, but shares that worker's protocol, wire schema, and validation code rather than inventing its own. A failure affects only the current document. USD remains a documented static preview subset rather than complete authoring fidelity.
 
-Rejected: generic USD marketing backed only by TinyUSDZ; in-process OpenUSD in the viewer or Shell provider; giving the host unrestricted filesystem/network access; a permanent import daemon.
+Rejected: generic USD marketing backed only by TinyUSDZ; in-process OpenUSD in the viewer or Shell provider; giving the host unrestricted filesystem/network access; a permanent import daemon; treating OpenUSD as the only format that needed this level of isolation.
+
+## ADR-014 — AppContainer import processes are the parser security boundary, not threads
+
+**Status:** Accepted for the revised MVP, adopted from external security review.
+
+Every third-party format parser and decoder — fastgltf, the STL/PLY product parsers, ufbx, lib3mf, TinyUSDZ, the Draco decoder, the KTX/Basis transcoder, libwebp, and DirectXTex/WIC, in addition to OpenUSD — runs only inside `Preview3DImportWorker.exe` or `Preview3DImportHost.exe`, both zero-capability AppContainer processes launched suspended or job-assigned before they process input, reachable from the trusted viewer only through a versioned wire-format protocol whose chunks the host copies to private memory and independently validates before trusting them. The `interactive-viewer` GLB vertical slice's current practice of parsing on a background `std::thread` inside `Preview3D.exe` is accepted as a prototyping shortcut for validating the responsive-shell/camera architecture, not as the shipped ingestion design, and must not be extended to additional formats before this ADR's architecture lands.
+
+Reason: a background thread is a **scheduling boundary** — it stops a slow or blocking operation from freezing the UI/render threads — not a **security boundary**. A memory-corruption bug in a parser running on any thread of `Preview3D.exe` still executes with that process's full privileges: the same address space as the window, the D3D12 device, the active-instance IPC listener, and (once implemented) the persistent derived cache. Threading changes nothing about what a successful exploit can do; only a process boundary with a different, more restricted token does. This generalizes the isolation the design already required for OpenUSD (ADR-013) to every parser, on the same reasoning: OpenUSD was never uniquely dangerous, it was simply the first format whose composition complexity made the risk obvious.
+
+Consequence: `Preview3D.exe` links no third-party format-parsing or decoding library. Format adapters, meshoptimizer, and texture decode/transcode all move out of the trusted process and into `Preview3DImportWorker.exe`; only OpenUSD gets its own separate, heavier process per ADR-013. The Gate 2 exit criteria in [10-delivery-plan.md](./10-delivery-plan.md) include proving this sandbox — launcher, protocol, and a synthetic hostile-worker acceptance test — before any real parser is wired to it, so a real parser's own bugs can never be mistaken for correct containment. NFR-14 and the invariants below are written against every import process uniformly, not against OpenUSD as a special case.
+
+Rejected: treating "parsing happens off the UI thread" as satisfying NFR-14; treating a shared-memory section as trusted merely because it "belongs" to the host after the worker signals completion (a compromised worker keeps write access to a mapped section for as long as it stays mapped on either side); isolating only OpenUSD while leaving every other parser in-process; deferring this refactor until after broad format support ships, which would require re-touching every adapter's threat model a second time.
 
 ## Invariants
 
@@ -182,16 +194,17 @@ The following are release blockers if violated:
 6. A source-derived path cannot escape the selected local model directory or trigger network access.
 7. A multi-gigabyte Tier A model does not require source-sized private commit or full-detail VRAM residency.
 8. Shell code launches no process, opens no sidecar/path, creates no GPU device, and writes no persistent model data.
-9. Closing the visible app terminates the viewer and any compatibility host; install/uninstall never take control of user defaults.
+9. Closing the visible app terminates the viewer and any import worker/compatibility host; install/uninstall never take control of user defaults.
 10. Persistent cache data is never trusted without version, identity, length, checksum, and normalized-scene validation; a cache failure is equivalent to a miss.
-11. OpenUSD runs only in the zero-capability AppContainer compatibility host; all dependencies are parent-brokered and all returned sections are revalidated before upload.
+11. No third-party format parser or decoder — general-format or OpenUSD — ever runs inside the trusted `Preview3D.exe` process, on any thread; every one runs only in a zero-capability AppContainer import process. All of its dependencies are parent-brokered, and every returned chunk descriptor and its bytes are copied to private host memory and revalidated before the shared section is treated as trustworthy or admitted to the upload/cache path.
 
 ## Risk register
 
 | ID | Risk | Probability / impact | Mitigation and evidence | Trigger / contingency |
 | --- | --- | --- | --- | --- |
 | R-01 | Copy queue shares hardware with graphics, so DMA does not overlap | Medium / Medium | Correctness never assumes overlap; bounded batches; frame/copy ETW on discrete and UMA | If copy batches hurt frames, reduce batch/time slice and staging target; retain old LOD longer |
-| R-02 | A Tier B library creates large intermediate state | High / High | Allocation callbacks/host limits, Tier B caps, early spike/peak-memory tests, transient normalized store | Lower per-format limit or replace adapter; never relax global memory invariant |
+| R-02 | A Tier B library creates large intermediate state, inside the import worker's Job Object | High / High | Allocation callbacks plus the worker's Job Object commit ceiling, Tier B caps, early spike/peak-memory tests, transient normalized store | Lower per-format limit or replace adapter; never relax global memory invariant |
+| R-02b | A memory-corruption bug in any format parser is reachable because it still runs on a background thread inside the trusted viewer, not in an AppContainer process | Medium / Critical | ADR-014 general import-worker refactor completed and proven (Gate 2 sandbox + hostile-worker suite) before Gate 3/4 wires real parsers to it | Do not extend the current GLB-in-viewer prototype to additional formats; block Gate 3 start until the sandbox exit criteria in Gate 2 are met |
 | R-03 | TinyUSDZ subset misses required USD assets or differs from OpenUSD normalization | Medium / High | typed fallback, overlap corpus, explicit feature matrix, AppContainer OpenUSD host | Route supported composition to host; narrow documented USD subset if results cannot be made consistent |
 | R-04 | Complete proxy misses 5-second target because bounds/simplification require full scan | Medium / High | source-order-independent stratified sampler, parallel bounded scan, early partial proxy telemetry | Tune proxy algorithm/chunking; maintain partial usefulness while treating gate miss as blocker |
 | R-05 | Transient/persistent derived stores consume disk or add latency | Medium / High | delete-on-close transient cap; 10 GiB/2 GiB persistent caps, free-space floor, atomic writes, background LRU | Stop cache admission/trim; fall back to uncached or coarse-only without delaying the viewer |
@@ -206,22 +219,24 @@ The following are release blockers if violated:
 | R-14 | First-window 150 ms target is missed by signing/AV/device startup | Medium / Medium | show native brush before device, lazy nonessential init, measure cold with common security software | Move additional initialization behind first present; revise target only with product approval/evidence |
 | R-15 | CPU thumbnail misses quality/time target on complex packages | Medium / Medium | representative sampling, fixed deadline, golden/perf corpus | Reduce triangle sample/supersampling; safely return generic icon |
 | R-16 | OpenUSD payload size/startup or host composition misses medium-file targets | Medium / High | lazy launch, `LoadNone`, brokered incremental payloads, warm derived cache, exact performance corpus | keep common stages on TinyUSDZ; lower composed-stage limits or document slower compatibility tier |
-| R-17 | Compatibility host escapes its file/network/process boundary or returns hostile shared data | Low / Critical | zero-capability AppContainer, kill-on-close Job Object, broker-only resolver, protocol/section revalidation, fuzz and penetration tests | disable OpenUSD fallback in servicing release until containment is restored |
+| R-17 | Import worker or compatibility host escapes its file/network/process boundary, or a compromised one mutates a shared section after the host's first read | Low / Critical | zero-capability AppContainer, kill-on-close Job Object, broker-only resolver, copy-then-validate chunk acceptance (never re-reading a shared section after the host's copy), fuzz and penetration tests including the Gate 2 synthetic hostile-worker suite | disable the affected format/fallback in servicing release until containment is restored |
 | R-18 | Persistent cache discloses derived model content or serves stale/corrupt geometry | Medium / High | current-user ACL, opaque keys/no names, file/change-journal version token or full digest, SHA-256 sections, normalized validation, user disable/clear | disable cache, invalidate schema, and purge affected entries on next launch |
 | R-19 | Draco/KTX2/WebP or expanded texture decode creates an expansion/OOM attack | Medium / High | per-payload decoded limits, pinned hardened decoders, cancellation, fuzz corpora, no decoder-global cache | fall back only for optional textures; reject required geometry and disable affected decoder if needed |
 | R-20 | PLY/point-cloud or Beam Lattice workloads create excessive primitives/draw cost | Medium / Medium | bounded list/tessellation, point proxy sampling, chunk draw caps, draw-heavy GPU timing | lower point/lattice density, preserve representative proxy, report reduced detail |
+| R-21 | A thumbnail CLSID ends up loaded in-process in `explorer.exe` (e.g. a future `DisableProcessIsolation=1` added for a perceived performance win) and a parser crash takes down Explorer instead of a surrogate | Low / Critical | installer/registry review prohibiting `DisableProcessIsolation`, post-install verification that each CLSID loads into the isolated surrogate, documented in [05-thumbnail-provider.md](./05-thumbnail-provider.md) | Remove the offending registry value in a servicing release; treat any such regression as a release blocker, not a waivable perf tradeoff |
 
 ## Required validation spikes
 
 These tasks validate implementation choices; they do not expand scope:
 
 1. Before Gate 1 completion, measure D3D11On12 overlay ordering and cost at 144 Hz, including resize and GPU validation.
-2. Before Gate 3 implementation, confirm exact fastgltf API/version support for mapped sources, sparse accessors, `KHR_mesh_quantization`, and `EXT_meshopt_compression`; separately measure bounded Draco decode and KTX2/Basis transcode on the compressed corpus.
-3. Before Gate 3 claims Tier-A PLY, spike binary little/big-endian sequential scanning, stratified proxy quality, point rendering, hostile list limits, and 2–4 GiB memory behavior.
-4. At Gate 4 start, build capped-memory/cancellation spikes for ufbx static skin/blend evaluation, lib3mf Beam Lattice tessellation, and TinyUSDZ before connecting them to the viewer.
-5. Before the OpenUSD slice, prove the AppContainer host's pinned minimal payload, `LoadNone` startup, brokered resolver, Job Object limits, cancellation/termination, shared-section validation, and overlap normalization corpus. Generic “USD support” must never imply all OpenUSD semantics.
-6. Before enabling persistent writes, prove file/change-journal token availability and invalidation, journal-reset and full-digest fallback cost, corrupt-entry fuzzing, atomic crash recovery, LRU/free-space behavior, warm-open value, and Clear cached previews races.
-7. Before Gate 6, benchmark mesh/point and compressed glTF CPU rasterizer prototypes inside the actual thumbnail surrogate.
-8. Before Gate 7, validate thumbnail-handler conflict, loaded-DLL/host upgrade behavior, signed/hash-verified OpenUSD payload search lockdown, and cache preservation/removal documentation on clean Windows 11 VMs.
+2. **Before Gate 2 is called complete** (moved earlier per ADR-014, not deferred to the OpenUSD slice), prove the general-purpose AppContainer import sandbox against a synthetic parser stand-in: suspended launch/creation-time job assignment, zero-capability token, `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` restricted handle inheritance, the versioned wire-format decoder, and the host's copy-then-validate chunk acceptance path, all defeating a synthetic hostile-worker build that mutates sections, replays generations, and lies about layout/offsets. Generic "the parser runs in a worker" must never be asserted before this spike passes.
+3. Before Gate 3 implementation, confirm exact fastgltf API/version support for mapped sources, sparse accessors, `KHR_mesh_quantization`, and `EXT_meshopt_compression`; separately measure bounded Draco decode and KTX2/Basis transcode on the compressed corpus, all inside the sandbox proven in spike 2.
+4. Before Gate 3 claims Tier-A PLY, spike binary little/big-endian sequential scanning, stratified proxy quality, point rendering, hostile list limits, and 2–4 GiB memory behavior.
+5. At Gate 4 start, build capped-memory/cancellation spikes for ufbx static skin/blend evaluation, lib3mf Beam Lattice tessellation, and TinyUSDZ before connecting them to the worker.
+6. Before the OpenUSD slice, prove the compatibility host's pinned minimal payload, `LoadNone` startup, brokered resolver, Job Object limits, cancellation/termination, shared-section validation (reusing the protocol/validator already proven in spike 2), and overlap normalization corpus against TinyUSDZ. Generic "USD support" must never imply all OpenUSD semantics.
+7. Before enabling persistent writes, prove file/change-journal token availability and invalidation, journal-reset and full-digest fallback cost, corrupt-entry fuzzing, atomic crash recovery, LRU/free-space behavior, warm-open value, and Clear cached previews races.
+8. Before Gate 6, benchmark mesh/point and compressed glTF CPU rasterizer prototypes inside the actual thumbnail surrogate, and confirm the surrogate loads out-of-process with no `DisableProcessIsolation` value present.
+9. Before Gate 7, validate thumbnail-handler conflict, loaded-DLL/host upgrade behavior, signed/hash-verified OpenUSD payload search lockdown, and cache preservation/removal documentation on clean Windows 11 VMs.
 
 If a spike fails, the team updates the corresponding ADR, product limits, and acceptance test before implementation continues. It may not quietly substitute an unbounded importer or a render-thread wait.

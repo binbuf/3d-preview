@@ -23,20 +23,26 @@ WiX source lives under installer and is built in the same pinned toolchain as th
 Release payload:
 
 - Preview3D.exe;
+- Preview3DImportWorker.exe plus fastgltf, the product STL/PLY parsers, ufbx, lib3mf, TinyUSDZ, the pinned Draco decoder, KTX/Basis transcoder, libwebp, DirectXTex/WIC, and meshoptimizer — every general-format parser/decoder the product ships, none of which is present in Preview3D.exe's own binary;
 - Preview3DImportHost.exe plus the exact signed app-local OpenUSD libraries and release-manifest-hashed resources required by its minimal host build;
 - Preview3DThumbnail.dll;
 - license/third-party notices;
 - optional local documentation and uninstaller metadata.
 
-Dependencies are statically linked where their licenses and support model permit. Draco, KTX/Basis, libwebp, DirectXTex, and the product PLY parser are part of the signed product dependency graph. OpenUSD and its required resources are private to `Preview3DImportHost.exe`; they are never registered system-wide, placed on PATH, or loaded into the viewer/thumbnail process. The MSI grants the host's AppContainer identity read/execute access only to that private payload; model and cache directories receive no such ACE. The MSVC runtime is app-local or statically linked according to the release security servicing decision; the package must not assume a developer machine's runtime. The MVP uses the Windows 11 system D3D12/DXGI/WIC/DirectWrite components and does not install the Agility SDK, graphics drivers, codecs, or a system-wide parser runtime.
+Dependencies are statically linked where their licenses and support model permit. Draco, KTX/Basis, libwebp, DirectXTex, and the product PLY parser are part of the signed product dependency graph, but they and every other general-format parser link only into `Preview3DImportWorker.exe`, never into `Preview3D.exe`. OpenUSD and its required resources are private to `Preview3DImportHost.exe`; they are never registered system-wide, placed on PATH, or loaded into the viewer/import-worker/thumbnail process. The MSI grants each import process's AppContainer identity read/execute access only to its own private payload; model and cache directories receive no such ACE for either process. The MSVC runtime is app-local or statically linked according to the release security servicing decision; the package must not assume a developer machine's runtime. The MVP uses the Windows 11 system D3D12/DXGI/WIC/DirectWrite components and does not install the Agility SDK, graphics drivers, codecs, or a system-wide parser runtime.
 
 PDBs and private diagnostics are archived with the release but are not in the consumer MSI. Every product PE file carries product/file versions, company/product strings, high-DPI/long-path manifests as appropriate, CFG/CET/NX/ASLR flags, and the same Authenticode publisher.
 
-## Compatibility-host identity
+## Import-process identities
 
-The stable AppContainer profile name is `Binbuf.Preview3D.ImportHost`. Its deterministic package SID is part of the installer manifest. MSI grants that SID read/execute access only to the private compatibility-host/OpenUSD payload. On first USD fallback for a user, the viewer creates or opens the profile with zero capabilities before creating the process; profile creation is not on ordinary startup and grants no model, cache, registry, device, or network access.
+Two distinct AppContainer profiles exist, one per import executable, so a policy or ACL change to one can never accidentally widen the other:
 
-Per-generation pipe, event, and shared-section ACLs admit only the current viewer identity, LocalSystem where required for diagnostics, and the host AppContainer SID. Handles are non-inheritable except for an explicit minimal launch list. Uninstall removes the machine payload/ACLs and attempts to remove the initiating user's unused profile; profiles created by other users may remain as inert security identities with no payload or resource grant and are documented for administrator cleanup.
+- `Binbuf.Preview3D.ImportWorker` for `Preview3DImportWorker.exe`, created at or before the first Open in a session;
+- `Binbuf.Preview3D.ImportHost` for `Preview3DImportHost.exe`, created only on first USD fallback for a user.
+
+Each profile's deterministic package SID is part of the installer manifest. MSI grants each SID read/execute access only to its own private payload — the worker's general-format parser/decoder binaries, or the host's OpenUSD libraries — never to the other's payload, and never to model or cache directories. Profile creation for either identity is not on ordinary startup beyond what that process's first use requires, and grants no model, cache, registry, device, or network access by itself.
+
+Per-generation pipe, event, and shared-section ACLs admit only the current viewer identity, LocalSystem where required for diagnostics, and the relevant import process's AppContainer SID — never both import SIDs on the same objects. Handles are non-inheritable except for an explicit minimal launch list passed through `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. Uninstall removes the machine payloads/ACLs for both profiles and attempts to remove the initiating user's unused profiles; profiles created by other users may remain as inert security identities with no payload or resource grant and are documented for administrator cleanup.
 
 ## Supported extensions
 
@@ -105,7 +111,7 @@ MSI component ownership is exact: every key/value has a component/key path and u
 
 1. Verify Windows 11 x64 and sufficient installer privileges.
 2. Detect related products by UpgradeCode and block downgrade.
-3. Use Restart Manager to request graceful close of Preview3D.exe, its compatibility host, and the isolated thumbnail surrogate if a product DLL is loaded. Never terminate or restart Explorer.
+3. Use Restart Manager to request graceful close of Preview3D.exe, its import worker and compatibility host, and the isolated thumbnail surrogate if a product DLL is loaded. Never terminate or restart Explorer.
 4. Install files to a staging/versioned component path, verify hashes through MSI, then commit registration.
 5. Broadcast association/thumbnail changes from an impersonated, non-elevated notification action in the initiating interactive session using SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, null, null).
 6. Complete without launching the viewer by default.
@@ -131,7 +137,7 @@ Binary/parser changes that can affect output increment the file version. The ins
 
 ## Repair
 
-Repair restores missing/corrupt product files including the compatibility-host payload, owned ProgIDs, capabilities, App Paths, and product-owned COM mappings. It:
+Repair restores missing/corrupt product files including the import-worker and compatibility-host payloads, owned ProgIDs, capabilities, App Paths, and product-owned COM mappings. It:
 
 - re-verifies Authenticode/file hashes through MSI;
 - does not replace another vendor's handler written after installation;
@@ -178,6 +184,6 @@ For each extension, tests verify:
 - Explorer shows a thumbnail or safe fallback without crashing;
 - uninstall removes product ownership and restores usable Explorer behavior.
 
-Compatibility-host package tests additionally verify that the AppContainer SID can read/execute only its private installed payload, cannot read a model/cache directory without a brokered handle, has no network capability, and loses all executable payload access after uninstall. Current-user profile cleanup and documented inert profiles for other users are verified separately.
+Import-process package tests, run identically for both `Preview3DImportWorker.exe` and `Preview3DImportHost.exe`, additionally verify that each AppContainer SID can read/execute only its own private installed payload (never the other process's), cannot read a model/cache directory without a brokered handle, has no network capability, and loses all executable payload access after uninstall. Current-user profile cleanup and documented inert profiles for other users are verified separately for both profiles.
 
 Primary references: [Default Programs registration](https://learn.microsoft.com/windows/win32/shell/default-programs), [file associations](https://learn.microsoft.com/windows/win32/shell/fa-file-types), [thumbnail handlers](https://learn.microsoft.com/windows/win32/shell/thumbnail-providers), [AppContainer isolation](https://learn.microsoft.com/windows/win32/secauthz/appcontainer-isolation), and [Restart Manager](https://learn.microsoft.com/windows/win32/rstmgr/restart-manager-portal).

@@ -22,7 +22,10 @@ Target root layout:
       design/
     shared/
       model-core/
+      import-broker/
       platform/
+    import-worker/
+      src/
     compatibility-host/
       src/
     interactive-viewer/
@@ -45,10 +48,10 @@ Target root layout:
 
 One root solution references:
 
-- ModelCore static library with format-independent types and adapters;
-- Preview3D Windows subsystem executable and zero-capability AppContainer Preview3DImportHost executable;
+- ModelCore static library with format-independent normalized-scene/wire-format contracts, and its format adapters (linked only by the two AppContainer import executables, never by the viewer or thumbnail DLL's own copies);
+- Preview3D Windows subsystem executable, zero-capability AppContainer Preview3DImportWorker executable (general formats), and zero-capability AppContainer Preview3DImportHost executable (OpenUSD);
 - Preview3DThumbnail COM DLL;
-- unit, headless adapter, cache, compatibility-host/broker, rendering, IPC, COM, fuzz, and performance executables;
+- unit, headless adapter, cache, import-broker (worker + host), rendering, IPC, COM, fuzz, and performance executables;
 - installer projects.
 
 Only x64 Debug and Release are product configurations. Win32 configurations and user-specific .vcxproj.user/.vs/build-output files are removed from source control. C++20, Unicode, conformance mode, /permissive-, warning level 4, warnings-as-errors for product code, reproducible build options, security flags, and common output directories live in Directory.Build.props/targets instead of drifting between projects.
@@ -94,7 +97,7 @@ Exit:
 - 100%, 150%, 200% DPI, Snap Layouts, Alt+Space, keyboard, high contrast, and reduce-motion checks pass;
 - render/UI thread ownership assertions pass under device removal and rapid resize.
 
-## Gate 2 — decoupled streaming proof
+## Gate 2 — decoupled streaming proof and import sandbox
 
 Deliver:
 
@@ -105,7 +108,9 @@ Deliver:
 - synthetic mapped geometry generator emitting bounded clusters/proxy/three LODs;
 - crash-safe bounded derived-cache prototype with hit/miss/corruption/eviction injection;
 - DXGI budget monitor, view-priority requester, detail eviction;
-- fault injection for delayed copy fences, OOM, budget loss, cancellation, and stale events.
+- fault injection for delayed copy fences, OOM, budget loss, cancellation, and stale events;
+- **the general-purpose AppContainer import sandbox itself**, before any real third-party parser is wired to it: `Preview3DImportWorker.exe`'s launcher (suspended launch or creation-time job assignment, zero-capability token, restricted handle-inheritance list), the broker protocol and versioned wire format from [03-file-formats-and-ingestion.md](./03-file-formats-and-ingestion.md), and the host-side copy-then-validate chunk acceptance path, all exercised against a synthetic in-sandbox generator standing in for a real parser;
+- a synthetic hostile-worker build of that same sandbox that deliberately mutates shared-section bytes after the host's first read, replays a stale generation, lies about a chunk's layout/offset, or overruns its Job Object limits, used to prove containment before it can be obscured by a real parser's own bugs.
 
 Exit:
 
@@ -114,13 +119,15 @@ Exit:
 - direct queue records no ordinary load-time wait on the copy fence;
 - a forced 2-second copy delay keeps the previous LOD presenting;
 - budget reduction preserves/rebuilds a usable proxy and produces no allocation loop;
-- open/close/reopen stress has no stale snapshot, leak, deadlock, or unbounded queue.
+- open/close/reopen stress has no stale snapshot, leak, deadlock, or unbounded queue;
+- the synthetic hostile-worker build is rejected by the host's validator on every injected fault above, with no corrupted bytes reaching the upload path and no elevation beyond the sandbox's zero-capability token;
+- the import sandbox's launcher, protocol, and validator are frozen as the interface real format adapters plug into during Gate 3/4 — a later gate may add adapters behind this boundary but must not weaken it.
 
-This gate validates the architecture before a parser can obscure its faults.
+This gate validates the architecture, including the parser security boundary, before a real parser's own correctness bugs can obscure a containment failure. Gate 3/4 format work explicitly builds inside the sandbox this gate proves, not beside it.
 
 ## Gate 3 — Tier A formats
 
-Deliver:
+Deliver, all of it running inside `Preview3DImportWorker.exe` behind the Gate 2 sandbox boundary:
 
 - normalized scene/chunk/material/texture contracts;
 - fastgltf GLB/glTF 2.0 adapter and constrained sidecar resolver;
@@ -130,7 +137,7 @@ Deliver:
 - meshoptimizer cluster LOD/proxy builder;
 - inbox WIC/DirectXTex/libwebp PNG/JPEG/BMP/TIFF/TGA/DDS/HDR/WebP and mip pipeline;
 - source-order-independent stratified first-proxy sampling;
-- persistent derived-cache production path plus transient Tier-A normalized store where needed;
+- persistent derived-cache production path (validated and written host-side from worker-produced chunks) plus transient Tier-A normalized store inside the worker where needed;
 - draw sorting/instancing and measured direct-versus-ExecuteIndirect threshold;
 - error/warning mapping and format diagnostics.
 
@@ -138,21 +145,22 @@ Exit:
 
 - A-small, A-medium, A-large GLB/STL/PLY, compressed, warm-cache, draw-heavy, and adversarial-layout fixtures meet all applicable time/memory/frame gates;
 - supported glTF feature corpus renders with expected counts/bounds/material snapshots;
-- malformed/overflow/cancellation/sidecar security suites pass;
-- no source-sized private heap allocation appears in A-large traces;
-- models larger than the current video-memory target remain inspectable through proxy and view refinement.
+- malformed/overflow/cancellation/sidecar security suites pass, including against the worker process rather than an in-process harness;
+- no source-sized private heap allocation appears in A-large traces, in either the worker or the trusted process;
+- models larger than the current video-memory target remain inspectable through proxy and view refinement;
+- the Gate 2 hostile-worker suite is re-run against each newly wired adapter and still passes — a real parser's bugs must not create a path around the copy-then-validate rule.
 
 ## Gate 4 — Tier B format breadth
 
-Deliver in independent vertical slices:
+Deliver in independent vertical slices, the first four inside `Preview3DImportWorker.exe` behind the Gate 2 sandbox and the fifth as the separate, heavier `Preview3DImportHost.exe` that reuses the same broker/protocol/validator:
 
 1. OBJ plus MTL through ufbx, including local texture policy.
 2. FBX deterministic static start-pose evaluation through ufbx, including supported skin/blend deformation and unified PBR mapping.
 3. 3MF Core/Materials/Production/Beam Lattice preview through lib3mf.
-4. USDA/USDC/USD and USDZ common static subset through TinyUSDZ.
-5. AppContainer compatibility host, brokered resolver, and broader bounded local static composition through OpenUSD.
+4. USDA/USDC/USD and USDZ common static subset through TinyUSDZ, still inside the general import worker.
+5. AppContainer compatibility host, brokered resolver, and broader bounded local static composition through OpenUSD, started only on that worker's typed `UnsupportedComposition` result.
 
-Every slice includes adapter wrapper, dependency allocation/I/O/cancel callbacks or host limits, normalized output, unsupported-feature diagnostics, golden scenes, malformed corpus, fuzz seed, cache-version effect, and license update. The OpenUSD slice additionally includes AppContainer restrictions, Job Object enforcement, broker protocol, shared-section revalidation, host crash/timeout behavior, and signed/hash-verified payload tests.
+Every slice includes adapter wrapper, dependency allocation/I/O/cancel callbacks and Job Object limits, normalized output, unsupported-feature diagnostics, golden scenes, malformed corpus, fuzz seed, cache-version effect, license update, and a re-run of the Gate 2 hostile-worker suite against the newly wired adapter. The OpenUSD slice additionally includes AppContainer restrictions, Job Object enforcement, broker protocol, shared-section revalidation, host crash/timeout behavior, and signed/hash-verified payload tests — the same class of tests slices 1–4 already carry for the import worker, not a stricter bar reserved for OpenUSD alone.
 
 Exit:
 
@@ -160,7 +168,7 @@ Exit:
 - conformance and product fixtures preserve expected hierarchy/instances/transforms within the documented subset;
 - lower Tier B limits fail safely and do not affect the next open;
 - archive bombs, recursive graphs, unsafe references, missing MTL/textures, deformed FBX poses, 3MF lattices, and unsupported/over-limit USD composition have specified outcomes;
-- TinyUSDZ/OpenUSD overlap fixtures normalize equivalently and the compatibility host cannot access an unbrokered file, network, plug-in, or child process;
+- TinyUSDZ/OpenUSD overlap fixtures normalize equivalently, and neither the import worker nor the compatibility host can access an unbrokered file, network, plug-in, or child process;
 - UI/render responsiveness and cancellation gates remain satisfied.
 
 ## Gate 5 — integrated viewer UX
@@ -202,6 +210,7 @@ Exit:
 - every extension routes to the intended CLSID;
 - thumbnail target/cutoff and 192 MiB scratch cap hold;
 - OBJ/glTF external sidecars are never opened from a Shell stream;
+- every registered CLSID is confirmed, on a clean installed machine, to load into the isolated Shell thumbnail surrogate rather than `explorer.exe`, and no installed registry value sets `DisableProcessIsolation`;
 - malformed/fuzz/parallel/unload soak produces no Explorer/surrogate crash, hang, handle leak, or persistent thread;
 - DllCanUnloadNow semantics and GDI ownership tests pass.
 

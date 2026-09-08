@@ -70,9 +70,10 @@ The formal gates restate and make measurable the NFRs in [01-product-scope.md](.
 | Verified warm-cache A-small / A-medium complete proxy | p95 ≤250 ms / ≤750 ms |
 | Verified warm-cache A-large complete coarse proxy | p95 ≤2 s |
 | Normal cancellation observation | p95 ≤100 ms; maximum 500 ms outside documented library calls |
-| Compatibility-host cancellation | acknowledgement ≤500 ms or bounded Job Object termination without viewer stall |
+| Import-worker or compatibility-host cancellation | acknowledgement ≤500 ms or bounded Job Object termination without viewer stall |
 | UI message heartbeat during any load | no gap >100 ms attributable to product work |
 | A-large private committed CPU memory | ≤1.5 GiB beyond baseline; mapped-file views reported separately |
+| Import-worker Job Object private commit | measured and fixed in Gate 2 to comfortably exceed the worst-case sum of the Tier A/B scratch, texture, and archive-expansion budgets in [03-file-formats-and-ingestion.md](./03-file-formats-and-ingestion.md); controlled failure at cap |
 | OpenUSD compatibility-host private commit | within the lower of 4 GiB and 35% of physical RAM; controlled failure at cap |
 | Persistent derived cache | ≤10 GiB default soft cap, ≤2 GiB per entry, and no admission below free-space floor |
 | Upload staging | ≤512 MiB and never overlaps an unretired ring range |
@@ -96,7 +97,7 @@ For Tier B, publish per-format and per-importer-path median/p95 import throughpu
 - every format adapter's token/range/graph validation;
 - PLY schema/list/endianness/property skipping and point/mesh normalization;
 - derived-cache keying, schema migration rejection, checksums, atomic commit, free-space policy, LRU, and clear races;
-- compatibility protocol framing, shared-section range/checksum validation, broker path decisions, and Job Object policy;
+- import protocol framing, shared-section range/checksum validation, broker path decisions, and Job Object policy, exercised identically against `Preview3DImportWorker.exe` and `Preview3DImportHost.exe`;
 - transform, up-axis/unit conversion, camera-relative precision, AABB/sphere;
 - triangulation, normal/tangent generation, cluster splitting, LOD error;
 - upload ring allocate/wrap/backpressure/retire model with generated fence sequences;
@@ -117,22 +118,23 @@ Property tests generate counts and ranges near 0, alignment boundaries, 32-bit/6
 - renderer golden scenes and camera controls at multiple aspect ratios/DPI;
 - device removal injection and one-shot recovery;
 - cancellation/reopen at every published pipeline checkpoint;
-- Shell provider hosted in an isolated COM test process and actual Explorer surrogate;
+- Shell provider hosted in an isolated COM test process and actual Explorer surrogate, with a post-install check that its CLSIDs load into the Shell thumbnail surrogate rather than `explorer.exe` and that no registered value sets `DisableProcessIsolation`;
 - primary/secondary IPC under concurrent launches;
-- zero-capability AppContainer creation, payload-only ACLs, brokered handle/section access, direct file/network denial, Job Object termination, and host restart;
+- zero-capability AppContainer creation, payload-only ACLs, brokered handle/section access, direct file/network denial, Job Object termination, and restart, run against **both** `Preview3DImportWorker.exe` and `Preview3DImportHost.exe` — every format adapter is covered by the same restriction suite the OpenUSD host already required, not a lighter check because it "only" runs a fast-path parser;
+- a synthetic hostile-worker build for each import process that mutates shared-section bytes after the host's first read, replays a stale generation, or lies about a chunk's declared layout/offset, proving the host's copy-then-validate rule actually rejects the mutation rather than merely trusting a well-behaved worker;
 - MSI clean/repair/upgrade/rollback/uninstall virtual-machine matrix.
 
 ### End-to-end soak
 
-An 8-hour scenario repeatedly opens mixed valid/malformed files through cold/cache/compatibility paths, orbits, resizes, minimizes, changes DPI/monitor, cancels, clears/rebuilds the cache, crashes/restarts the import host, lowers memory budget, and closes/reopens. It fails on:
+An 8-hour scenario repeatedly opens mixed valid/malformed files through cold/cache/worker/compatibility paths, orbits, resizes, minimizes, changes DPI/monitor, cancels, clears/rebuilds the cache, crashes/restarts the import worker and the compatibility host, lowers memory budget, and closes/reopens. It fails on:
 
 - process/worker/surrogate crash or hang;
 - D3D debug-layer error/corruption warning;
 - GDI/User/handle/thread count growth beyond established noise;
 - monotonic private-commit or descriptor/resource growth;
 - stale generation becoming visible;
-- a stale/corrupt cache entry or invalid host section becoming visible;
-- a compatibility host, temporary cache write, or broker handle surviving its generation;
+- a stale/corrupt cache entry or invalid worker/host section becoming visible;
+- an import worker, compatibility host, temporary cache write, or broker handle surviving its generation;
 - UI heartbeat or shutdown deadline violation.
 
 ## Graphics validation
@@ -177,7 +179,7 @@ Each format has a standalone, no-GPU fuzz target that accepts bytes plus a const
 - OBJ/MTL and FBX adapter options/callbacks;
 - 3MF/USDZ archive directory and expansion accounting;
 - USDA/USDC object graphs;
-- compatibility-host protocol/shared-section descriptors and broker dependency requests;
+- import-worker and compatibility-host protocol/shared-section descriptors and broker dependency requests, including the wire-format header/chunk-descriptor decoder itself;
 - persistent-cache manifests, indexes, section tables, and normalized payloads;
 - image metadata/decode boundary;
 - IPC frame and JSON;
@@ -194,7 +196,7 @@ An attacker may control:
 - per-user derived-cache files and indexes modified or replaced by the current user or local malware;
 - Shell IStream behavior;
 - IPC connection attempts and payload bytes from local processes;
-- compatibility-host exit behavior, control frames, dependency requests, and shared-section bytes;
+- import-worker and compatibility-host exit behavior, control frames, dependency requests, and shared-section bytes — including a fully compromised worker/host that deliberately mutates a shared section after the host's first read, since Windows gives every mapped view of a section coherent live access for as long as it stays mapped;
 - extreme GPU workload intended to trigger timeout/removal;
 - archive nesting/paths and Unicode edge cases.
 
@@ -208,7 +210,7 @@ Windows, the signed installed payload, and the graphics driver are trust depende
 
 - DEP/NX, ASLR/high entropy VA, CFG, CET compatibility, SDL checks, and stack protection enabled.
 - Safe DLL search established before optional loads; current directory and model directory never enter DLL search.
-- The viewer and thumbnail provider load no runtime plug-ins, scripts, shader compiler, environment-selected codecs, or product network stack. The compatibility host loads only release-manifest-listed, signed app-local OpenUSD modules and hash-verified resources by absolute path after DLL search and plug-in discovery are locked down.
+- The viewer loads no third-party format parser or decoder and no runtime plug-ins, scripts, shader compiler, environment-selected codecs, or product network stack; every such library loads only inside `Preview3DImportWorker.exe` (general formats) or `Preview3DImportHost.exe` (OpenUSD). The thumbnail provider loads its own bounded copies under Shell's process isolation, per [05-thumbnail-provider.md](./05-thumbnail-provider.md). Both import processes load only release-manifest-listed, signed app-local modules and hash-verified resources by absolute path after DLL search and plug-in discovery are locked down.
 - Release loads only system components through documented mechanisms and product binaries by absolute installed path.
 - Authenticode and dependency/SBOM controls follow [08-installation-and-registration.md](./08-installation-and-registration.md).
 
@@ -216,7 +218,7 @@ Windows, the signed installed payload, and the graphics driver are trust depende
 
 - Handle-based canonical path checks and FILE_SHARE_READ-only lifetime policy reduce time-of-check/time-of-use changes.
 - All sizes/counts use checked 64-bit math before conversion to size_t/D3D types.
-- Allocation, depth, object, dependency, time, decoded-pixel, and archive-ratio budgets are enforced through mandatory in-process callbacks and/or the compatibility-host broker and Job Object limits.
+- Allocation, depth, object, dependency, time, decoded-pixel, and archive-ratio budgets are enforced through mandatory parser callbacks inside the owning import process and, independently, by that process's broker/Job Object limits — a callback bug in one layer does not remove the other.
 - Archive entry names are canonicalized as virtual relative paths; absolute, drive, device, alternate-stream, traversal, duplicate-conflicting, and symlink-like entries are rejected.
 - Temporary normalized stores use random names, current-user-only ACLs, delete-on-close handles, and non-executable data.
 - Persistent cache directories use current-user-only ACLs. Entries use opaque names, bounded manifests, checked section tables, and cryptographic checksums; data is revalidated as untrusted normalized input before upload.
@@ -231,14 +233,14 @@ Windows, the signed installed payload, and the graphics driver are trust depende
 
 ### Shell and IPC
 
-- The thumbnail provider observes the stricter policy in [05-thumbnail-provider.md](./05-thumbnail-provider.md), including no path/sidecar/network access.
+- The thumbnail provider observes the stricter policy in [05-thumbnail-provider.md](./05-thumbnail-provider.md), including no path/sidecar/network access, and depends on Shell's default surrogate-process isolation rather than any in-process mitigation; `DisableProcessIsolation` MUST NOT be set for its CLSIDs.
 - Named objects use explicit current-user/session ACLs; clients are authenticated and payloads bounded.
 - The receiver never invokes a shell with model-derived text.
-- The compatibility host is launched with a zero-capability AppContainer token and assigned to its kill-on-close Job Object before processing input. It cannot access the network/model directory directly or create child processes and receives model dependencies only through the parent broker. The parent rejects unexpected request order, unknown message/section versions, stale generations, and invalid ranges/checksums.
+- Both `Preview3DImportWorker.exe` and `Preview3DImportHost.exe` are launched with a zero-capability AppContainer token and assigned to a kill-on-close Job Object *before* they process any input — the broker launches suspended or assigns the job at process-creation time so no import code ever runs under a less-restricted intermediate state. Neither can access the network/model directory directly or create child processes, and each receives model dependencies only through the parent broker via an explicit `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, not broad handle inheritance. The parent rejects unexpected request order, unknown message/section versions, stale generations, and invalid ranges/checksums, and — because a shared section stays writable by the child for as long as it is mapped — never treats a chunk as trusted until it has copied the chunk's descriptor and bytes into its own memory and independently re-validated them; the shared section itself is never re-read afterward.
 
 ### Privacy
 
-There is no telemetry or crash upload in MVP. Default release logs contain timestamps, build/device identifiers, stage/code/counters, cache hit/miss reasons, compatibility-host exit codes, and correlation IDs but not file content, material/mesh names, full paths, or rendered images. Copy details includes paths only after explicit user choice. Temporary data is deleted on close/crash cleanup at next launch. Persistent derived entries contain renderable model-derived geometry/textures, are bounded to the current user's profile, omit names/paths, can be disabled, and can be removed with Clear cached previews.
+There is no telemetry or crash upload in MVP. Default release logs contain timestamps, build/device identifiers, stage/code/counters, cache hit/miss reasons, import-worker and compatibility-host exit codes, and correlation IDs but not file content, material/mesh names, full paths, or rendered images. Copy details includes paths only after explicit user choice. Temporary data is deleted on close/crash cleanup at next launch. Persistent derived entries contain renderable model-derived geometry/textures, are bounded to the current user's profile, omit names/paths, can be disabled, and can be removed with Clear cached previews.
 
 ## Dependency policy
 
@@ -252,7 +254,7 @@ Every third-party component needs:
 - no unreviewed transitive dynamic dependency;
 - an upgrade/rollback record.
 
-Warnings and exceptions from dependency headers are contained at a dedicated build target boundary; product code remains warning-clean. Updating a parser is a behavior change requiring corpus, performance, memory, thumbnail-host, and installer license retest. Updating OpenUSD or a compatibility-host module additionally requires broker/protocol, restriction, composed-stage, binary-size/startup, and signed-payload retesting. Updating Draco, KTX/Basis, libwebp, or DirectXTex requires compressed-expansion and image fuzz corpora plus cache-version review.
+Warnings and exceptions from dependency headers are contained at a dedicated build target boundary; product code remains warning-clean. Updating a parser is a behavior change requiring corpus, performance, memory, thumbnail-host, and installer license retest. Updating any import-worker or compatibility-host module — the boundary is symmetric between them — additionally requires broker/protocol, restriction, composed-stage/normalization, binary-size/startup, and signed-payload retesting. Updating Draco, KTX/Basis, libwebp, or DirectXTex requires compressed-expansion and image fuzz corpora plus cache-version review.
 
 ## CI and release evidence
 
@@ -269,7 +271,7 @@ Nightly:
 
 - hardware D3D debug and performance smoke;
 - malformed/cancellation/device-pressure matrix;
-- persistent-cache and compatibility-host fault matrix;
+- persistent-cache, import-worker, and compatibility-host fault matrix;
 - thumbnail surrogate stress;
 - install lifecycle VMs;
 - longer fuzzing.

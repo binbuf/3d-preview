@@ -16,7 +16,7 @@ The supported input families are GLB/glTF, STL, PLY, OBJ with MTL, FBX, 3MF, and
 4. [`04-rendering-and-streaming.md`](04-rendering-and-streaming.md) — D3D12 device, queues, upload ring, synchronization, progressive LOD, residency, and device recovery.
 5. [`05-thumbnail-provider.md`](05-thumbnail-provider.md) — COM implementation, stream-only import, CPU rasterization, isolation, and bitmap ownership.
 6. [`06-application-lifecycle-and-ipc.md`](06-application-lifecycle-and-ipc.md) — startup, active-instance forwarding, cancellation, close, and shutdown.
-7. [`07-user-experience.md`](07-user-experience.md) — window, loading/ready/error states, controls, accessibility, and progressive-detail feedback.
+7. [`07-user-experience.md`](07-user-experience.md) — window, chrome, camera, and error UX as currently implemented in the GLB vertical slice; progressive-detail/accessibility/cache UX described elsewhere remain forward targets until later gates land.
 8. [`08-installation-and-registration.md`](08-installation-and-registration.md) — MSI contents, COM and application registration, signing, upgrade, and uninstall.
 9. [`09-quality-performance-and-security.md`](09-quality-performance-and-security.md) — test matrix, performance method, fuzzing, threat controls, and release gates.
 10. [`10-delivery-plan.md`](10-delivery-plan.md) — gated implementation slices, traceability, and definition of done.
@@ -48,6 +48,18 @@ The recommended direction is retained, with these engineering clarifications:
 - `fastgltf` covers glTF 2.0 structure; product adapters add the pinned Draco decoder, KTX2/Basis transcoder, and texture decoders. STL and PLY use product-owned bounded parsers; ufbx covers FBX and OBJ/MTL; lib3mf covers 3MF. TinyUSDZ is the fast USD/USDZ path and an AppContainer OpenUSD host is the compatibility fallback.
 - A persistent cache improves repeat opens but is never trusted as source data. Entries are versioned, checksummed, identity-bound, size-limited, LRU-evicted, and clearable by the user. A miss or corrupt entry falls back to ordinary import.
 - 144 Hz is a display-dependent operating point, not a universal promise. Loading work is prohibited from blocking input/present, and measured frame-time gates are defined for a 144 Hz reference system.
+
+## Ingestion security refactor (external review, 2026-09-07)
+
+An external security review of the ingestion/rendering design (full findings recorded as [ADR-014](11-decisions-and-risks.md#adr-014-appcontainer-import-processes-are-the-parser-security-boundary-not-threads)) reached this verdict: the renderer design is solid, but background threads are a scheduling boundary, not a security boundary, and every source parser — not only OpenUSD — must run in a zero-capability AppContainer process before broad format support ships. Consequences applied throughout this document set:
+
+- a new general-purpose `Preview3DImportWorker.exe` now hosts every fast-path parser/decoder (fastgltf, STL/PLY, ufbx, lib3mf, TinyUSDZ, Draco, KTX/Basis, libwebp, DirectXTex/WIC, meshoptimizer); `Preview3D.exe` links none of them ([02](02-system-architecture.md), [03](03-file-formats-and-ingestion.md), [11](11-decisions-and-risks.md) ADR-014);
+- a shared section is validated by copying it to private host memory before trust, not merely by inspecting it in place, because a compromised worker retains write access to a mapped section for as long as it stays mapped ([02](02-system-architecture.md), [03](03-file-formats-and-ingestion.md));
+- the renderer's descriptor-table baseline, D3D12MA multi-heap use, per-frame CBV camera data, and enumerated vertex layouts are confirmed and locked as invariants rather than revised ([04](04-rendering-and-streaming.md), [11](11-decisions-and-risks.md) ADR-009);
+- the thumbnail handler's isolation now explicitly forbids `DisableProcessIsolation` ([05](05-thumbnail-provider.md), [11](11-decisions-and-risks.md) ADR-007);
+- the import sandbox and its hostile-worker proof move to Gate 2, before any real parser is wired to it ([10](10-delivery-plan.md)).
+
+Separately, [`07-user-experience.md`](07-user-experience.md) was rewritten to describe the UI/UX actually implemented in the current GLB vertical slice (custom chrome, flight/orbit camera, navigation gizmo, info panel) rather than the earlier aspirational multi-format UX description; see that document's scope note.
 
 ## Primary technical references
 

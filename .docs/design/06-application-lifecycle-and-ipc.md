@@ -2,9 +2,9 @@
 
 ## Process model
 
-interactive-viewer is a standalone native GUI executable. It is not a daemon, service, tray application, browser host, or child of the thumbnail provider. It may broker one zero-capability AppContainer `Preview3DImportHost.exe` child for a current OpenUSD compatibility import; that child has no UI and is not persistent background infrastructure.
+interactive-viewer is a standalone native GUI executable. It is not a daemon, service, tray application, browser host, or child of the thumbnail provider. It links no third-party format parser or decoder itself; it brokers a zero-capability AppContainer `Preview3DImportWorker.exe` for ordinary format parsing and, for USD generations outside the TinyUSDZ subset, a second zero-capability AppContainer `Preview3DImportHost.exe` for OpenUSD composition. Neither child has UI and neither is persistent background infrastructure — the worker is reused across generations within a session but is not a daemon, and the host starts only per USD generation.
 
-There is at most one normal viewer process per interactive Windows user session while a viewer window is open. Launching another model forwards an Open request to that visible instance and activates it. Closing the last viewer window requests cancellation, terminates any compatibility-host job, and terminates the process; there is no warm background mode in the MVP.
+There is at most one normal viewer process per interactive Windows user session while a viewer window is open. Launching another model forwards an Open request to that visible instance and activates it. Closing the last viewer window requests cancellation, terminates any import-worker and compatibility-host jobs, and terminates the process; there is no warm background mode in the MVP.
 
 This is a usability policy, not an architectural dependency. A developer-only switch may bypass forwarding for debugging, but it is not registered with Explorer.
 
@@ -35,7 +35,7 @@ The executable separates first-visible work from heavy initialization:
 3. Attempt to become the per-session primary via the secured singleton protocol.
 4. If secondary, authenticate to the pipe, forward the normalized path, await an acknowledgement, and exit.
 5. If primary, initialize COM STA on the UI thread, register the window class, create/show the HWND, and begin the message pump.
-6. Start the active-instance IPC listener, render thread, upload coordinator, cache coordinator, and bounded worker pool without waiting for device/file readiness on the UI thread. Do not load OpenUSD or start the compatibility host.
+6. Start the active-instance IPC listener, render thread, upload coordinator, cache coordinator, and bounded loader/broker pool without waiting for device/file readiness on the UI thread. Do not load OpenUSD, start the compatibility host, or start the import worker before the first Open request.
 7. Send any startup path through the same UI command path as IPC and drag/drop opens.
 
 The solid client background is painted by the window until the first swap-chain frame is ready, so device creation never presents an unresponsive black window. Startup failures become a native error surface or message box while the message pump remains operational.
@@ -82,7 +82,7 @@ A dedicated low-duty IPC thread owns pipe creation and overlapped connection/rea
 
 At most 16 open commands may wait. Newer Open commands supersede older queued Open commands, while Activate may coalesce. Payload reads have size and time limits. Shutdown cancels overlapped I/O with CancelIoEx and closes the pipe only after completion records retire.
 
-The active-instance protocol is distinct from the private compatibility-host protocol in [02-system-architecture.md](./02-system-architecture.md). They do not share pipe names, framing, ACLs, parsers, or payload types. The compatibility pipe exists only while its child Job Object and generation are live and never accepts arbitrary local clients.
+The active-instance protocol is distinct from the private import-broker protocol in [02-system-architecture.md](./02-system-architecture.md) — the one shared by `Preview3DImportWorker.exe` and `Preview3DImportHost.exe`. They do not share pipe names, framing, ACLs, parsers, or payload types. Each import pipe exists only while its child Job Object and generation are live and never accepts arbitrary local clients.
 
 ## Document state machine
 
@@ -113,16 +113,16 @@ The following request generation cancellation:
 - closing the document/window;
 - parser/resource budget failure;
 - device recovery that invalidates an upload generation;
-- compatibility-host failure/timeout;
+- import-worker or compatibility-host failure/timeout;
 - process shutdown.
 
-Cancellation is normally a stop request, not a forced thread termination. Tasks check at the bounded points defined in [03-file-formats-and-ingestion.md](./03-file-formats-and-ingestion.md). Stale CPU events and fence completions are dropped by generation. Mapped views, transient stores, shared sections, and cache-entry leases remain alive until their final lease retires. The AppContainer compatibility host receives a cooperative cancel first; only its Job Object may be terminated after the finite grace period.
+Cancellation is normally a stop request, not a forced thread termination. Tasks check at the bounded points defined in [03-file-formats-and-ingestion.md](./03-file-formats-and-ingestion.md), whether they run in the trusted loader/broker pool or inside an import process. Stale CPU events and fence completions are dropped by generation. Mapped views, transient stores, shared sections, and cache-entry leases remain alive until their final lease retires. Each AppContainer import process receives a cooperative cancel first; only its Job Object may be terminated after the finite grace period.
 
 Targets:
 
 - queued but unstarted work disappears within 50 ms;
-- active normalizer/LOD/texture tasks observe stop within 100 ms p95 and 500 ms maximum outside a non-interruptible third-party call;
-- the compatibility host acknowledges cancellation within 500 ms or is terminated with all returned sections invalidated;
+- active normalizer/LOD/texture tasks — now running inside the import worker rather than the trusted process — observe stop within 100 ms p95 and 500 ms maximum outside a non-interruptible third-party call;
+- each import process acknowledges cancellation within 500 ms or is terminated with all of its returned sections invalidated;
 - every third-party adapter uses its progress/cancellation hook where one exists;
 - cancellation never waits on the UI or render thread.
 
@@ -131,7 +131,7 @@ Targets:
 WM_CLOSE begins an asynchronous close:
 
 1. AppState enters Closing, rejects/negatively acknowledges new IPC Open requests, and hides the window promptly.
-2. UI requests stop on the document, active-instance pipe, compatibility-host job, cache coordinator, workers, upload coordinator, and render thread.
+2. UI requests stop on the document, active-instance pipe, import-worker and compatibility-host jobs, cache coordinator, workers, upload coordinator, and render thread.
 3. The hidden UI thread continues pumping messages; it does not join threads or wait for GPU fences.
 4. Owners drain/cancel their bounded queues. The GPU lanes perform the finite shutdown sequence in [04-rendering-and-streaming.md](./04-rendering-and-streaming.md).
 5. When coordinators report Stopped, the UI destroys the window and exits the message loop.
@@ -145,7 +145,7 @@ Console control, system shutdown, and session-end notifications take the same st
 - Worker threads needing WIC: CoInitializeEx(COINIT_MULTITHREADED), balanced on thread exit.
 - Render/upload threads: initialize COM only for the APIs they own; DirectWrite factory can be shared only according to its documented threading mode, while device contexts remain thread-affine.
 - IPC thread: no COM requirement.
-- compatibility host: OpenUSD and broker client initialize only after process restrictions, DLL search policy, and Job Object assignment are active.
+- import worker and compatibility host: their parser/OpenUSD libraries and broker client initialize only after process restrictions, DLL search policy, and Job Object assignment are active.
 
 Apartment violations are caught in developer builds with owner-thread assertions.
 
@@ -174,10 +174,10 @@ Document parse errors do not terminate the application and therefore do not beco
 - paths with spaces, emoji, combining characters, long-path prefixes, and JSON metacharacters round-trip;
 - open storms preserve bounded queues and newest intent;
 - closing during map/parse/simplify/copy/fence/device recovery terminates without UAF or a UI wait;
-- compatibility-host crash, hang, malformed shared section, spoof attempt, and limit termination affect only the current document generation;
+- import-worker or compatibility-host crash, hang, malformed shared section, spoof attempt, and limit termination affect only the current document generation, and this is verified for every format routed through the worker, not only for OpenUSD;
 - cache clear racing with lookup/write/open retires leases safely and leaves no partial committed entry;
 - stale mutex/abandoned primary recovery;
 - foreground-denied activation behavior;
-- clean process exit leaves no listener, compatibility host, mapped source, transient store, temporary cache write, thread, or GPU handle; committed bounded derived-cache entries may remain by design.
+- clean process exit leaves no listener, import worker, compatibility host, mapped source, transient store, temporary cache write, thread, or GPU handle; committed bounded derived-cache entries may remain by design.
 
 Primary references: [Named pipe security](https://learn.microsoft.com/windows/win32/ipc/named-pipe-security-and-access-rights), [GetNamedPipeClientProcessId](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid), and [CancelIoEx](https://learn.microsoft.com/windows/win32/fileio/cancelioex-func).

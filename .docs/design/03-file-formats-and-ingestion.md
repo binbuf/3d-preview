@@ -4,6 +4,8 @@
 
 This document defines what “supports a format” means, how untrusted files enter the process, and the normalized scene contract consumed by the renderer. It deliberately separates the large-file fast path from compatibility importers.
 
+**Process boundary.** Every parser and decoder named in this document — fastgltf, the STL/PLY product parsers, ufbx, lib3mf, TinyUSDZ, the Draco decoder, the KTX/Basis transcoder, libwebp, and DirectXTex/WIC — executes only inside the zero-capability AppContainer `Preview3DImportWorker.exe` (or, for OpenUSD composition beyond the TinyUSDZ subset, `Preview3DImportHost.exe`), never inside the trusted `Preview3D.exe` process that owns the window, the D3D12 device, and the user's other open documents. Moving parsing to a background thread inside `Preview3D.exe`, as the current GLB-only vertical slice does, is a responsiveness measure only; it does not change the trust boundary and must not be treated as containment for a parser exploit. See [02-system-architecture.md](./02-system-architecture.md) and [ADR-014](./11-decisions-and-risks.md#adr-014-appcontainer-import-processes-are-the-parser-security-boundary-not-threads).
+
 ## Support matrix
 
 | Input | Parser | MVP content | Deliberate limits | Performance tier |
@@ -28,24 +30,35 @@ All primary inputs are local, regular, non-empty files. The loader rejects:
 - files that change identity or size after opening;
 - integer overflow, overlapping ranges where prohibited by the format, invalid UTF encoding, non-finite geometry, and counts that exceed the applicable budget.
 
-The app canonicalizes a path with GetFinalPathNameByHandleW after opening it. It holds the primary handle for the generation's lifetime with FILE_SHARE_READ only, which prevents ordinary replacement, deletion, or writing while pointers are live. Each sidecar is opened and checked independently. Security checks are performed on the final handle path, not only on user-provided text.
+Path authority lives only in the trusted process. `Preview3D.exe` canonicalizes a path with GetFinalPathNameByHandleW after opening it, holds the primary handle for the generation's lifetime with FILE_SHARE_READ only (preventing ordinary replacement, deletion, or writing while pointers are live), and opens/checks each sidecar independently. Security checks are performed on the final handle path, not only on user-provided text. `Preview3DImportWorker.exe` and `Preview3DImportHost.exe` never open a path themselves: the trusted process duplicates a read-only handle across the process boundary for the primary file and every approved local dependency, and a worker/host asset resolver may only request additional dependencies from the broker by relative reference, never by opening a path or URI itself. This is what makes "no network access, no path escape" an enforceable process-level property instead of a parser-callback convention: even a fully compromised worker holds no handle capable of opening an arbitrary file or socket.
 
-No importer performs network access. In-process third-party parsers allocate and resolve resources only through product callbacks that enforce the generation's cancellation token, byte budget, item-count limits, and path policy. OpenUSD internal allocation is additionally contained by the compatibility-host Job Object/commit budget. The host receives no path authority: its custom resolver requests read-only dependencies from the viewer broker, which applies the same handle-based canonicalization before duplicating a handle or serving bytes.
+No importer performs network access. Third-party parsers, wherever they run, allocate and resolve resources only through product callbacks that enforce the generation's cancellation token, byte budget, item-count limits, and path policy. OpenUSD internal allocation is additionally contained by the compatibility-host Job Object/commit budget; the general-format parsers in `Preview3DImportWorker.exe` are contained the same way by its Job Object/commit budget. Both hosts receive no path authority: their custom resolvers request read-only dependencies from the viewer broker, which applies the same handle-based canonicalization before duplicating a handle or serving bytes.
 
 ## Mapped-file abstraction
 
-Model Core exposes a read-only MappedFile and MappingLease abstraction:
+Model Core exposes a read-only MappedFile and MappingLease abstraction, used inside `Preview3DImportWorker.exe`/`Preview3DImportHost.exe` against the handles the broker duplicated to them:
 
-1. Open with CreateFileW using GENERIC_READ, FILE_SHARE_READ, and OPEN_EXISTING. Use a sequential access hint for STL, PLY, and packaged sequential scans, a random-access hint for glTF/USD offset graphs, and no hint when the access pattern is not yet known; the extension is only a cache hint, never a trust decision.
+1. Open with CreateFileW using GENERIC_READ, FILE_SHARE_READ, and OPEN_EXISTING — or, for a duplicated handle received from the broker, reopen a mapping directly from that handle without a fresh CreateFileW call. Use a sequential access hint for STL, PLY, and packaged sequential scans, a random-access hint for glTF/USD offset graphs, and no hint when the access pattern is not yet known; the extension is only a cache hint, never a trust decision.
 2. Query file size and identity with GetFileInformationByHandleEx and reject zero-length or non-regular inputs.
 3. Create a PAGE_READONLY file mapping.
 4. For a compact source, map the complete file. For very large sources and sidecars, map aligned windows on demand using the system allocation granularity.
-5. Return a span of const bytes whose lifetime cannot exceed its MappingLease. No parser-owned raw pointer may survive a lease.
+5. Return a span of const bytes whose lifetime cannot exceed its MappingLease. No parser-owned raw pointer may survive a lease, and no such pointer or lease ever crosses the process boundary — only the normalized wire-format chunks defined below do.
 6. Unmap windows only after every task using the lease has released it.
 
-Mapping a file removes an eager full-file userspace copy; it does not make parsing allocation-free and does not make file bytes directly usable as GPU vertex data. The OS commits physical pages as they are touched. Normalized geometry, decompressed archives, decoded textures, acceleration data, upload staging, and GPU resources remain explicitly budgeted.
+Mapping a file removes an eager full-file userspace copy; it does not make parsing allocation-free and does not make file bytes directly usable as GPU vertex data. The OS commits physical pages as they are touched. Normalized geometry, decompressed archives, decoded textures, acceleration data, upload staging, and GPU resources remain explicitly budgeted — and, for Tier A and Tier B alike, those budgets are now enforced against the import process's Job Object commit limit in addition to the in-process allocation callbacks.
 
 Validated upcoming sequential ranges may be submitted to `PrefetchVirtualMemory` when profiling shows a benefit; correctness and responsiveness cannot depend on prefetch completion. For glTF BIN data, binary STL, and supported binary PLY layouts, adapters retain validated source offsets and decode bounded ranges into reusable scratch blocks. A parser that requires contiguous ownership receives a budgeted arena, never an unbounded vector sized from a file field.
+
+## Wire format between the trusted process and an import process
+
+Normalized output crosses the process boundary only as chunk descriptors over a bounded shared-memory section, per the copy-then-validate rule in [02-system-architecture.md](./02-system-architecture.md). The wire format is versioned and intentionally simple to validate:
+
+- a fixed-width header (protocol version, generation ID, section length, chunk count, and a section-level checksum) at a fixed offset, read first and fully bounds-checked before any other field is trusted;
+- one fixed-width descriptor per chunk (source/normalized range, topology, index/vertex counts, an explicit numeric vertex-layout ID drawn from a closed enumeration — never a raw stride/format the receiver must interpret unchecked —, LOD level, byte size, dependency IDs, and a per-chunk checksum), never a variable-length or self-describing record that the host would need to interpret before it can be bounds-checked;
+- payload bytes placed at offsets the descriptor names, always validated against the section length and the chunk's declared byte size before the host will copy them;
+- no embedded pointers, indices into host-process memory, or host-interpreted format strings anywhere in the section.
+
+A new protocol version is a breaking change requiring updated fixtures, fuzz corpora, and an explicit compatibility decision — the host never attempts to interpret a section whose version it does not recognize. This wire format, not the shared-memory mechanism by itself, is what lets the host snapshot rule in [02-system-architecture.md](./02-system-architecture.md) be a cheap, bounded, fully-checkable copy rather than an open-ended deserialization of untrusted structure.
 
 ## Import generations
 
@@ -67,7 +80,7 @@ Opening another file requests stop on the prior generation and immediately makes
 
 fastgltf validates glTF 2.0 structure while the adapter owns URI resolution and data access. GLB headers, JSON/BIN ranges, buffer views, accessors, strides, sparse accessors, and component conversions are checked before use. `KHR_mesh_quantization`, `EXT_meshopt_compression`, `KHR_draco_mesh_compression`, `KHR_texture_basisu`, `EXT_texture_webp`, `KHR_texture_transform`, and `KHR_materials_unlit` are accepted when their required data passes validation. meshoptimizer, the pinned Draco decoder, KTX/Basis transcoder, and libwebp handle their corresponding payloads behind the same budgets. Unknown required extensions fail clearly. Unknown optional extensions are ignored only when core geometry remains valid and are reported in diagnostics.
 
-Draco decode is scheduled per primitive on the loader pool and publishes nothing until the decoded attributes and indices pass count/range/finite validation. A primitive whose decoded working set would exceed 512 MiB or 10 million triangles fails with `ResourceLimit`; the design does not claim out-of-core decoding within one Draco bitstream. Meshopt-compressed buffer views remain suitable for bounded range decode.
+Draco decode is scheduled per primitive inside the import worker and publishes nothing across the process boundary until the decoded attributes and indices pass count/range/finite validation there. A primitive whose decoded working set would exceed 512 MiB or 10 million triangles fails with `ResourceLimit`; the design does not claim out-of-core decoding within one Draco bitstream. Meshopt-compressed buffer views remain suitable for bounded range decode.
 
 Accessor min/max values may produce provisional scene bounds quickly, but they are not trusted as verified bounds. A bounded position scan verifies them while geometry is normalized. If verified bounds materially differ and the user has not moved the camera, the app eases to the corrected frame. If the user has interacted, camera target and scale are corrected without overriding their orientation.
 
@@ -105,7 +118,7 @@ Before lib3mf reads the bounded OPC stream, product code preflights the ZIP cent
 
 ### USD and USDZ
 
-TinyUSDZ first handles USDA, USDC, and USDZ files in the common static subset. It returns a distinct `UnsupportedComposition` result when otherwise valid input requires composition outside that subset. Only that result triggers the compatibility path; malformed data, unsafe references, archive violations, and resource-limit failures do not receive a more permissive retry.
+TinyUSDZ runs inside `Preview3DImportWorker.exe` and first handles USDA, USDC, and USDZ files in the common static subset there. It returns a distinct `UnsupportedComposition` result when otherwise valid input requires composition outside that subset. Only that result asks the broker to start the separate `Preview3DImportHost.exe` for the same generation; malformed data, unsafe references, archive violations, and resource-limit failures do not receive a more permissive retry in either process.
 
 The AppContainer compatibility host opens the stage through pinned OpenUSD with initial payload loading disabled. Its composition policy permits sublayers, references, inherits/specializes, and authored default variant selections; its brokered resolver admits only approved local asset dependencies. Discovery and payload loading proceed breadth-first under dependency-count, byte, depth, time, and memory limits. Payloads needed for the build/default stage are loaded incrementally. The host emits only the normalized static subset: meshes, transforms, instances/point instances, display color, and supported Preview Surface bindings. Animation, skeletal schemas, MaterialX, procedural schemas, renderer plug-ins, remote assets, and interactive variant selection remain outside MVP. USDZ archive entries use the same archive/path limits regardless of adapter.
 
@@ -142,7 +155,7 @@ Tier B adapters feed the same normalized chunk contract and LOD builder when the
 
 ## Hard limits
 
-Limits are checked before multiplication/allocation and are configurable only in developer builds.
+Limits are checked before multiplication/allocation and are configurable only in developer builds. These are the in-process budgets enforced by parser callbacks inside `Preview3DImportWorker.exe`; they are backstopped, not replaced, by that process's Job Object commit ceiling, which Gate 2 measures and sets high enough to comfortably cover a worst-case combination of the scratch, texture, and archive-expansion rows below plus working-set overhead, so the in-process budgets are always the first and cheaper line of defense. A Job Object kill is a correctness fallback for a budget-check defect, not the intended enforcement path.
 
 | Budget | Tier A viewer | Tier B viewer | Thumbnail host |
 | --- | ---: | ---: | ---: |
@@ -185,6 +198,7 @@ Adapters return typed errors, not localized strings:
 - ResourceLimit, OutOfMemory, Cancelled;
 - NoSupportedGeometry, TextureDecodeFailed;
 - UnsupportedComposition, CompatibilityHostFailure, CompatibilityHostLimit;
+- ImportWorkerFailure, ImportWorkerLimit, ImportProtocolViolation;
 - InternalImporterFailure.
 
 The application maps these to user text and preserves format, byte offset/object path where safe, and a correlation ID in diagnostic logs. Third-party exceptions never cross a module boundary.
@@ -192,5 +206,7 @@ The application maps these to user text and preserves format, byte offset/object
 ## Verification
 
 Every adapter requires valid, malformed, truncated, adversarial-count, cancellation, and limit fixtures. Tier A tests additionally assert bounded resident CPU memory, source-order-independent proxy representation, and that no source-sized heap allocation occurs. PLY fixtures cover ASCII and both binary endiannesses, meshes, point clouds, unknown properties, and hostile lists. glTF fixtures cover Draco/KTX2/WebP success and decoded-expansion limits. FBX fixtures verify deterministic static skin/blend evaluation. USD fixtures run both fast and compatibility paths and assert equivalent normalized output where their supported subsets overlap. The same normalized-scene invariant suite runs across all formats.
+
+Every adapter's isolation, not only its parsing correctness, is verified: a synthetic hostile-worker build (deliberately mutating shared-section bytes after the host's first read, replaying stale generations, or lying about a chunk's declared layout ID) proves the copy-then-validate rule in [02-system-architecture.md](./02-system-architecture.md) actually rejects the mutation, rather than only proving that well-formed workers behave. This test exists once per wire-format version, not once per format, since the host's validator is format-agnostic — but it must be in place before any real parser adapter ships behind it, per Gate 2 in [10-delivery-plan.md](./10-delivery-plan.md).
 
 Primary references: [Windows file mapping](https://learn.microsoft.com/windows/win32/memory/file-mapping), [fastgltf](https://github.com/spnda/fastgltf), [Google Draco](https://github.com/google/draco), [KTX-Software](https://github.com/KhronosGroup/KTX-Software), [ufbx](https://github.com/ufbx/ufbx), [lib3mf](https://github.com/3MFConsortium/lib3mf), [TinyUSDZ](https://github.com/lighttransport/tinyusdz), [OpenUSD](https://openusd.org/release/), [DirectXTex](https://github.com/microsoft/DirectXTex), and [meshoptimizer](https://github.com/zeux/meshoptimizer).
