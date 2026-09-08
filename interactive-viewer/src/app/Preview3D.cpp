@@ -5,6 +5,7 @@
 #include "Model.h"
 #include "Renderer.h"
 #include "NavGizmo.h"
+#include "Settings.h"
 #include "ShellIntegration.h"
 
 #include <commctrl.h>
@@ -155,6 +156,12 @@ struct ViewerApp
     bool meshSelected = false;
     bool gridVisible = true;
     bool axisSnapEnabled = false;
+    // Display the loaded model in its native/source orientation instead of
+    // this app's normalized Z-up correction (Model.h's ModelData::
+    // upAxisCorrection). Persisted via Settings.h; default matches
+    // ViewerSettings' default (normalized).
+    bool showNativeOrientation = false;
+    bool settingsPanelOpen = false;
     std::wstring speedHudText;
     double speedHudUntil = 0.0;
     std::wstring modeHudText;
@@ -252,6 +259,34 @@ RECT InfoPanelRect(const ViewerApp& app)
         static_cast<int>(std::lround(layout.right)), static_cast<int>(std::lround(layout.bottom)) };
 }
 
+// The root transform currently mapping the loaded model's native/source axes
+// into the app's Z-up world: identity while "show native orientation" is on
+// (or there's no model), else ModelData::upAxisCorrection. Camera, grid, and
+// the Information panel must always reason about the model in this
+// transformed (effective) space — see EffectiveBounds below — while picking
+// (ClickSelect) must invert it to reach PickMesh's native-space vertices.
+DirectX::XMMATRIX ActiveModelTransform(const ViewerApp& app)
+{
+    if (!app.loadedModel || app.showNativeOrientation) return DirectX::XMMatrixIdentity();
+    return DirectX::XMLoadFloat4x4(&app.loadedModel->upAxisCorrection);
+}
+
+// The bounds actually occupying the app's Z-up world right now. Every
+// consumer that used to read ModelData::boundsMin/boundsMax directly for
+// display/camera purposes must use this instead, since those raw fields stay
+// in the model's native/source space regardless of the toggle.
+void EffectiveBounds(const ViewerApp& app, DirectX::XMFLOAT3& outMin, DirectX::XMFLOAT3& outMax)
+{
+    if (!app.loadedModel)
+    {
+        outMin = DirectX::XMFLOAT3{};
+        outMax = DirectX::XMFLOAT3{};
+        return;
+    }
+    TransformBounds(app.loadedModel->boundsMin, app.loadedModel->boundsMax,
+        ActiveModelTransform(app), outMin, outMax);
+}
+
 // How far app.infoPanelScrollOffset may go before the section list's last row
 // reaches the panel's bottom edge — WM_MOUSEWHEEL clamps against this on
 // every tick (Renderer::DrawInfoPanel clamps again from the same
@@ -262,9 +297,12 @@ float InfoPanelMaxScroll(const ViewerApp& app)
     const RECT panel = InfoPanelRect(app);
     const float panelHeight = static_cast<float>(panel.bottom - panel.top);
     if (panelHeight <= 0.0f) return 0.0f;
+    DirectX::XMFLOAT3 effectiveMin{};
+    DirectX::XMFLOAT3 effectiveMax{};
+    EffectiveBounds(app, effectiveMin, effectiveMax);
     const std::vector<InfoPanelSection> sections = BuildInfoPanelSections(
         app.loadedModel->stats, app.loadedModel->triangleCount, app.loadedModel->vertices.size(),
-        app.loadedModel->boundsMin, app.loadedModel->boundsMax);
+        effectiveMin, effectiveMax);
     const InfoPanelScrollMetrics metrics = ComputeInfoPanelScrollMetrics(sections, app.dpiScale);
     const float visibleHeight = std::max(0.0f, panelHeight - metrics.headerHeight);
     return std::max(0.0f, metrics.contentHeight - visibleHeight);
@@ -475,6 +513,40 @@ RECT SpeedFlyoutTrackRect(const ViewerApp& app)
     return RECT{ panel.left + marginX, trackCenterY - halfHeight, panel.right - marginX, trackCenterY + halfHeight };
 }
 
+// Settings popup panel/row/switch geometry, shared by drawing (RenderScene)
+// and input handling (WM_LBUTTONDOWN) so they can never disagree. Mirrors
+// SpeedFlyoutRect/SpeedFlyoutTrackRect just above, anchored under the
+// Overflow ("...") button instead of the Speed button.
+RECT SettingsPanelRect(const ViewerApp& app)
+{
+    const RECT overflowButton = app.chrome.Button(Chrome::Part::Overflow).rect;
+    const int width = Scale(app, 280);
+    const int height = Scale(app, 64);
+    const int gap = Scale(app, 6);
+    RECT client{};
+    GetClientRect(app.window, &client);
+    int left = std::min(overflowButton.left, client.right - Scale(app, 8) - width);
+    left = std::max(left, Scale(app, 8));
+    const int top = app.toolbarHeight + gap;
+    return RECT{ left, top, left + width, top + height };
+}
+
+RECT SettingsToggleRowRect(const ViewerApp& app)
+{
+    const RECT panel = SettingsPanelRect(app);
+    const int marginX = Scale(app, 16);
+    return RECT{ panel.left + marginX, panel.top, panel.right - marginX, panel.bottom };
+}
+
+RECT SettingsSwitchRect(const ViewerApp& app)
+{
+    const RECT row = SettingsToggleRowRect(app);
+    const int switchWidth = Scale(app, 36);
+    const int switchHeight = Scale(app, 20);
+    const int centerY = (row.top + row.bottom) / 2;
+    return RECT{ row.right - switchWidth, centerY - switchHeight / 2, row.right, centerY + switchHeight / 2 };
+}
+
 void BeginWrappedDrag(ViewerApp& app, const POINT& point)
 {
     app.wrapDrag = true;
@@ -603,10 +675,16 @@ void ClickSelect(ViewerApp& app, const POINT& point)
     BuildPickRay(app.camera, static_cast<float>(point.x), static_cast<float>(point.y),
         static_cast<float>(viewport.right - viewport.left),
         static_cast<float>(viewport.bottom - viewport.top), origin, direction);
+    // PickMesh scans vertices in the model's native/source space, which
+    // differs from the ray's app-world (Z-up) space whenever an up-axis
+    // correction is active — undo it on the ray rather than the mesh.
+    const DirectX::XMMATRIX inverseModel = DirectX::XMMatrixInverse(nullptr, ActiveModelTransform(app));
+    const DirectX::XMVECTOR localOrigin = DirectX::XMVector3TransformCoord(origin, inverseModel);
+    const DirectX::XMVECTOR localDirection = DirectX::XMVector3TransformNormal(direction, inverseModel);
     DirectX::XMFLOAT3 originValue{};
     DirectX::XMFLOAT3 directionValue{};
-    DirectX::XMStoreFloat3(&originValue, origin);
-    DirectX::XMStoreFloat3(&directionValue, direction);
+    DirectX::XMStoreFloat3(&originValue, localOrigin);
+    DirectX::XMStoreFloat3(&directionValue, localDirection);
     float hitDistance = 0.0f;
     const bool hit = PickMesh(*app.loadedModel, originValue, directionValue, hitDistance);
     if (hit && !app.meshSelected)
@@ -626,7 +704,10 @@ void FrameSelectedOrAll(ViewerApp& app)
     const float aspect = ViewportAspect(app);
     if (app.meshSelected && app.loadedModel)
     {
-        app.camera.FrameBox(app.loadedModel->boundsMin, app.loadedModel->boundsMax, aspect);
+        DirectX::XMFLOAT3 effectiveMin{};
+        DirectX::XMFLOAT3 effectiveMax{};
+        EffectiveBounds(app, effectiveMin, effectiveMax);
+        app.camera.FrameBox(effectiveMin, effectiveMax, aspect);
     }
     else
     {
@@ -792,7 +873,7 @@ TooltipInfo ComputeTooltipInfo(const ViewerApp& app)
     // pressed, the Speed flyout open) rather than just delayed, so a tooltip
     // never appears over something the user is actively using.
     if (app.chrome.pressed != Chrome::Part::None || app.infoButtonPressed || app.fullscreenButtonPressed ||
-        app.speedSliderDragging || app.zoomSliderDragging || app.speedFlyoutOpen)
+        app.speedSliderDragging || app.zoomSliderDragging || app.speedFlyoutOpen || app.settingsPanelOpen)
     {
         return {};
     }
@@ -885,6 +966,31 @@ void ToggleAxisSnap(ViewerApp& app)
     app.axisSnapEnabled = !app.axisSnapEnabled;
     ShowModeHud(app, app.axisSnapEnabled ? L"Axis snap on" : L"Axis snap off");
     InvalidateRect(app.window, nullptr, FALSE);
+}
+
+// Persisted independently of whether a file is currently open (it's a
+// standing preference, not a per-document action), but only re-homes the
+// camera/grid when a model is actually loaded to apply against.
+void ToggleShowNativeOrientation(ViewerApp& app)
+{
+    app.showNativeOrientation = !app.showNativeOrientation;
+    if (HasNavigableModel(app))
+    {
+        DirectX::XMFLOAT3 effectiveMin{};
+        DirectX::XMFLOAT3 effectiveMax{};
+        EffectiveBounds(app, effectiveMin, effectiveMax);
+        std::wstring gridError;
+        app.renderer.RebuildGrid(effectiveMin, effectiveMax, gridError);
+        // An instant re-home (not Fit/Reset, which animate): the model just
+        // jumped ~90 degrees, so the old camera pose has no useful
+        // relationship to the new one — treat this exactly like a fresh open.
+        app.camera.SetBounds(effectiveMin, effectiveMax, ViewportAspect(app));
+        ShowModeHud(app, app.showNativeOrientation ? L"Native orientation" : L"Normalized orientation");
+    }
+    InvalidateRect(app.window, nullptr, FALSE);
+    ViewerSettings settings;
+    settings.showNativeOrientation = app.showNativeOrientation;
+    SaveSettings(settings);
 }
 
 void SnapViewCommand(ViewerApp& app, ViewDir view)
@@ -1202,6 +1308,7 @@ void ShowMoreMenu(ViewerApp& app)
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     }
     AppendMenuW(menu, MF_STRING, ID_VIEW_CONTROLS, L"Controls\t?");
+    AppendMenuW(menu, MF_STRING, ID_VIEW_SETTINGS, L"Settings…");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_ABOUT, L"About 3D Preview");
     RECT button = app.chrome.Button(Chrome::Part::Overflow).rect;
@@ -1211,13 +1318,21 @@ void ShowMoreMenu(ViewerApp& app)
     DestroyMenu(menu);
 }
 
+// Menu-invoked, not keyboard-repeatable, so no ConsumeToggleCommand guard is
+// needed (unlike ToggleGrid/ToggleAxisSnap).
+void ToggleSettingsPanel(ViewerApp& app)
+{
+    app.settingsPanelOpen = !app.settingsPanelOpen;
+    InvalidateRect(app.window, nullptr, FALSE);
+}
+
 void ShowControls(HWND owner)
 {
     MessageBoxW(owner,
         L"Select\tClick a mesh; click the background to clear\n"
         L"Orbit\tLeft drag, gizmo ball drag, or arrow keys\n"
         L"Truck (pan)\tMiddle drag or Shift+arrow keys\n"
-        L"Axis snap\tToggle the Snap button to lock truck moves to X/Z\n"
+        L"Axis snap\tToggle the Snap button to lock truck moves to X/Y\n"
         L"Zoom\tWheel, Ctrl+middle drag, +, or -\n"
         L"Fly\tHold right mouse + W/A/S/D, Q/E; wheel or slider sets speed\n"
         L"Fly faster\tHold Shift while flying (2x)\n"
@@ -1324,6 +1439,7 @@ void HandleCommand(ViewerApp& app, int id)
     case ID_VIEW_COPY_DETAILS: CopyErrorDetails(app); break;
     case ID_VIEW_CANCEL: CancelOpen(app); break;
     case ID_VIEW_CONTROLS: ShowControls(app.window); break;
+    case ID_VIEW_SETTINGS: ToggleSettingsPanel(app); break;
     case ID_VIEW_DIAGNOSTICS:
         MessageBoxW(app.window, app.warning.c_str(), L"Model warnings", MB_OK | MB_ICONWARNING);
         break;
@@ -1455,9 +1571,12 @@ void RenderScene(ViewerApp& app)
     overlay.infoPanelWidth = InfoPanelWidthPixels(app);
     if (overlay.infoPanelWidth > 0 && app.loadedModel)
     {
+        DirectX::XMFLOAT3 effectiveMin{};
+        DirectX::XMFLOAT3 effectiveMax{};
+        EffectiveBounds(app, effectiveMin, effectiveMax);
         overlay.infoPanelSections = BuildInfoPanelSections(
             app.loadedModel->stats, app.loadedModel->triangleCount, app.loadedModel->vertices.size(),
-            app.loadedModel->boundsMin, app.loadedModel->boundsMax);
+            effectiveMin, effectiveMax);
         overlay.infoPanelScrollOffset = app.infoPanelScrollOffset;
     }
     overlay.zoomPercent = ZoomPercentFor(app.camera);
@@ -1476,6 +1595,7 @@ void RenderScene(ViewerApp& app)
     overlay.hasModel = app.renderer.HasModel();
     overlay.gridVisible = app.gridVisible;
     overlay.axisSnapEnabled = app.axisSnapEnabled;
+    DirectX::XMStoreFloat4x4(&overlay.modelTransform, ActiveModelTransform(app));
     overlay.infoPanelVisible = app.infoPanelVisible;
     overlay.speedFlyoutOpen = app.speedFlyoutOpen && HasNavigableModel(app);
     if (overlay.speedFlyoutOpen)
@@ -1484,6 +1604,14 @@ void RenderScene(ViewerApp& app)
         overlay.speedFlyoutTrackRect = SpeedFlyoutTrackRect(app);
         overlay.speedSliderT = static_cast<float>(SpeedSliderPositionFor(app.camera.FlySpeedScale())) / kSpeedSliderMax;
         overlay.speedValueText = L"×" + FormatMultiplier(app.camera.FlySpeedScale());
+    }
+    overlay.settingsPanelOpen = app.settingsPanelOpen;
+    overlay.showNativeOrientation = app.showNativeOrientation;
+    if (overlay.settingsPanelOpen)
+    {
+        overlay.settingsPanelRect = SettingsPanelRect(app);
+        overlay.settingsToggleRowRect = SettingsToggleRowRect(app);
+        overlay.settingsSwitchRect = SettingsSwitchRect(app);
     }
     overlay.selectionAmount = app.meshSelected ? 1.0f : 0.0f;
     const double now = NowSeconds();
@@ -1945,6 +2073,22 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             // so clicking a different title-bar button both dismisses the
             // flyout and performs that click in one action.
         }
+        if (app->settingsPanelOpen)
+        {
+            const RECT switchRect = SettingsSwitchRect(*app);
+            const RECT panel = SettingsPanelRect(*app);
+            if (PtInRect(&switchRect, downPoint))
+            {
+                ToggleShowNativeOrientation(*app);
+                return 0;
+            }
+            app->settingsPanelOpen = false;
+            InvalidateRect(window, nullptr, FALSE);
+            if (PtInRect(&panel, downPoint)) return 0;
+            // Same outside-click semantics as the Speed flyout above: close
+            // and still fall through, so a click on another button both
+            // dismisses this panel and performs that click in one action.
+        }
         // The raw toolbarHeight, not EffectiveToolbarHeight (0 in Fullscreen)
         // — the action buttons stay clickable there as a floating toolbar
         // overlaying the full-monitor viewport (WM_NCHITTEST above already
@@ -2373,6 +2517,7 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         StopNavigation(*app);
         EndPointer(*app);
         if (app->speedFlyoutOpen) { app->speedFlyoutOpen = false; InvalidateRect(window, nullptr, FALSE); }
+        if (app->settingsPanelOpen) { app->settingsPanelOpen = false; InvalidateRect(window, nullptr, FALSE); }
         return 0;
     case WM_CONTEXTMENU:
         return 0;
@@ -2406,7 +2551,12 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
             app->warning = complete->result.model->warning;
             app->loadedModel = complete->result.model;
             app->meshSelected = false;
-            app->camera.SetBounds(complete->result.model->boundsMin, complete->result.model->boundsMax, ViewportAspect(*app));
+            DirectX::XMFLOAT3 effectiveMin{};
+            DirectX::XMFLOAT3 effectiveMax{};
+            EffectiveBounds(*app, effectiveMin, effectiveMax);
+            std::wstring gridError;
+            app->renderer.RebuildGrid(effectiveMin, effectiveMax, gridError);
+            app->camera.SetBounds(effectiveMin, effectiveMax, ViewportAspect(*app));
             app->state = ViewerState::Ready;
             app->failedPath.clear();
             app->errorSummary.clear();
@@ -2486,6 +2636,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
 
     ViewerApp app;
     app.instance = instance;
+    const ViewerSettings settings = LoadSettings();
+    app.showNativeOrientation = settings.showNativeOrientation;
     int argumentCount = 0;
     PWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
     if (arguments && argumentCount > 1) app.initialPath = arguments[1];

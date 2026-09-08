@@ -55,15 +55,40 @@ struct ModelStats
     int nodeCount = 0;
 };
 
+// A source format's up axis at rest, as reported by its importer. Used only
+// to pick/derive ModelData::upAxisCorrection; nothing downstream branches on
+// this directly.
+enum class SourceUpAxis
+{
+    Unknown,
+    Y,   // glTF/GLB's mandated up axis.
+    Z,   // The ecosystem-norm up axis for STL/3MF/etc. (no importer yet).
+};
+
 struct ModelData
 {
+    // Baked node transforms, exactly as the source format authored them
+    // (glTF is Y-up) — never re-baked to the app's own Z-up convention.
     std::vector<ModelVertex> vertices;
     std::vector<std::uint32_t> indices;
-    DirectX::XMFLOAT3 boundsMin{};
+    DirectX::XMFLOAT3 boundsMin{};   // raw, in the same native/source space as `vertices`
     DirectX::XMFLOAT3 boundsMax{};
     std::uint64_t triangleCount = 0;
     std::wstring warning;
     ModelStats stats;
+
+    // Root transform mapping this model's native/source axes into the app's
+    // own Z-up world (NavGizmo.h, Renderer.cpp's Camera). Applied only at
+    // render/pick/bounds time — never baked into `vertices` above — so a
+    // live "show native orientation" toggle can swap it for identity
+    // instantly, with no re-parse and no vertex-buffer rebuild.
+    SourceUpAxis sourceUpAxis = SourceUpAxis::Unknown;
+    DirectX::XMFLOAT4X4 upAxisCorrection = []
+    {
+        DirectX::XMFLOAT4X4 identity{};
+        DirectX::XMStoreFloat4x4(&identity, DirectX::XMMatrixIdentity());
+        return identity;
+    }();
 };
 
 struct LoadResult
@@ -83,11 +108,22 @@ LoadResult LoadGlb(
     const LoadProgressCallback& progress);
 
 // Ray-versus-mesh intersection for click selection. The importer bakes node
-// transforms, so vertices are already in world space and the ray is cast in
-// world space. `direction` does not need to be normalized. Returns true and
-// sets `hitDistance` to the entry distance along the normalized direction.
+// transforms, so vertices are already in the model's native/source space —
+// callers must transform the ray into that space first (undo
+// ModelData::upAxisCorrection, i.e. use its inverse) before calling this.
+// `direction` does not need to be normalized. Returns true and sets
+// `hitDistance` to the entry distance along the normalized direction.
 bool PickMesh(
     const ModelData& model,
     const DirectX::XMFLOAT3& origin,
     const DirectX::XMFLOAT3& direction,
     float& hitDistance);
+
+// Transforms an axis-aligned box's 8 corners by `transform` and returns the
+// new axis-aligned box enclosing them. Used to re-derive display/camera
+// bounds whenever the active root transform (ModelData::upAxisCorrection vs.
+// identity) changes, without touching the baked vertex data.
+void TransformBounds(
+    const DirectX::XMFLOAT3& minimum, const DirectX::XMFLOAT3& maximum,
+    DirectX::FXMMATRIX transform,
+    DirectX::XMFLOAT3& outMinimum, DirectX::XMFLOAT3& outMaximum);

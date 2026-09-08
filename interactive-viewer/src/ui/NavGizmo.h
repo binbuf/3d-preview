@@ -2,9 +2,12 @@
 
 #include <DirectXMath.h>
 
-// Canonical axis-aligned view orientations for a Y-up, right-handed world
-// (the glTF convention this viewer renders in). "Front" looks along +Z at the
-// model, matching the glTF asset front; the reverse views look from behind.
+// Canonical axis-aligned view orientations for this viewer's own Z-up,
+// right-handed world. A source format may use a different up axis at rest —
+// glTF/GLB, for example, is Y-up by spec — but that is corrected on the way
+// in (see Model.h's ModelData::upAxisCorrection) before anything reaches the
+// camera, gizmo, or grid; this file only ever deals in the app's Z-up frame.
+// "Front" looks along +Y at the model; the reverse views look from behind.
 enum class ViewDir
 {
     Front,

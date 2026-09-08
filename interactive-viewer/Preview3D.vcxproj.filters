@@ -51,6 +51,9 @@
     <ClInclude Include="src\app\Preview3D.h">
       <Filter>Header Files\app</Filter>
     </ClInclude>
+    <ClInclude Include="src\app\Settings.h">
+      <Filter>Header Files\app</Filter>
+    </ClInclude>
     <ClInclude Include="src\render\Model.h">
       <Filter>Header Files\render</Filter>
     </ClInclude>
@@ -72,6 +75,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\app\Preview3D.cpp">
+      <Filter>Source Files\app</Filter>
+    </ClCompile>
+    <ClCompile Include="src\app\Settings.cpp">
       <Filter>Source Files\app</Filter>
     </ClCompile>
     <ClCompile Include="src\render\Model.cpp">

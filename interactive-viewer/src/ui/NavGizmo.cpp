@@ -42,7 +42,7 @@ XMVECTOR OrientationFromForwardUp(XMVECTOR forward, XMVECTOR up)
     {
         // Pole case: the requested up is parallel to the view axis. Fall back
         // to the next world axis so the basis stays orthonormal.
-        const XMVECTOR alternateUp = XMVectorSet(0, 0, 1, 0);
+        const XMVECTOR alternateUp = XMVectorSet(0, 1, 0, 0);
         right = XMVector3Cross(alternateUp, back);
         if (XMVectorGetX(XMVector3LengthSq(right)) < 1e-8f) right = XMVectorSet(1, 0, 0, 0);
         up = alternateUp;
@@ -58,16 +58,20 @@ XMVECTOR OrientationFromForwardUp(XMVECTOR forward, XMVECTOR up)
 
 XMVECTOR CanonicalViewOrientation(ViewDir view)
 {
-    const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
-    const XMVECTOR worldFront = XMVectorSet(0, 0, -1, 0);
+    // Y and Z swap roles from the app's old Y-up convention: X stays
+    // Left/Right, Y now takes Front/Back (was Z), and Z now takes Top/Bottom
+    // (was Y), preserving the original invariant that forward = -axis and
+    // the eye ends up on the +axis side for every ViewDir.
+    const XMVECTOR worldUp = XMVectorSet(0, 0, 1, 0);
+    const XMVECTOR worldBack = XMVectorSet(0, -1, 0, 0);
     switch (view)
     {
-    case ViewDir::Front: return OrientationFromForwardUp(XMVectorSet(0, 0, 1, 0), worldUp);
-    case ViewDir::Back: return OrientationFromForwardUp(worldFront, worldUp);
+    case ViewDir::Front: return OrientationFromForwardUp(XMVectorSet(0, 1, 0, 0), worldUp);
+    case ViewDir::Back: return OrientationFromForwardUp(worldBack, worldUp);
     case ViewDir::Right: return OrientationFromForwardUp(XMVectorSet(-1, 0, 0, 0), worldUp);
     case ViewDir::Left: return OrientationFromForwardUp(XMVectorSet(1, 0, 0, 0), worldUp);
-    case ViewDir::Top: return OrientationFromForwardUp(XMVectorSet(0, -1, 0, 0), XMVectorSet(0, 0, -1, 0));
-    case ViewDir::Bottom: return OrientationFromForwardUp(XMVectorSet(0, 1, 0, 0), XMVectorSet(0, 0, -1, 0));
+    case ViewDir::Top: return OrientationFromForwardUp(XMVectorSet(0, 0, -1, 0), XMVectorSet(0, -1, 0, 0));
+    case ViewDir::Bottom: return OrientationFromForwardUp(XMVectorSet(0, 0, 1, 0), XMVectorSet(0, -1, 0, 0));
     }
     return XMQuaternionIdentity();
 }
@@ -209,15 +213,16 @@ NavGizmo::DrawGeometry NavGizmo::ComputeDraw(XMVECTOR cameraOrientation) const
 ViewDir NavGizmo::ViewFor(Part part) const
 {
     // Clicking a node snaps the camera to that side of the model: the +X node
-    // parks the eye on +X looking down -X (Right), and so on.
+    // parks the eye on +X looking down -X (Right), and so on. Z is this
+    // app's up axis, so +Z/-Z now map to Top/Bottom (Y took over Front/Back).
     switch (part)
     {
     case Part::PosX: return ViewDir::Right;
     case Part::NegX: return ViewDir::Left;
-    case Part::PosY: return ViewDir::Top;
-    case Part::NegY: return ViewDir::Bottom;
-    case Part::PosZ: return ViewDir::Back;
-    case Part::NegZ: return ViewDir::Front;
+    case Part::PosY: return ViewDir::Back;
+    case Part::NegY: return ViewDir::Front;
+    case Part::PosZ: return ViewDir::Top;
+    case Part::NegZ: return ViewDir::Bottom;
     default: return ViewDir::Front;
     }
 }

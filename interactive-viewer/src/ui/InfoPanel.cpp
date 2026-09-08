@@ -52,8 +52,8 @@ std::vector<InfoPanelSection> BuildInfoPanelSections(
     sections.push_back({ L"Dimensions",
         {
             { L"Width (X)", FormatMeters(boundsMax.x - boundsMin.x) },
-            { L"Height (Y)", FormatMeters(boundsMax.y - boundsMin.y) },
-            { L"Depth (Z)", FormatMeters(boundsMax.z - boundsMin.z) },
+            { L"Depth (Y)", FormatMeters(boundsMax.y - boundsMin.y) },
+            { L"Height (Z)", FormatMeters(boundsMax.z - boundsMin.z) },
         } });
 
     sections.push_back({ L"Mesh Data",

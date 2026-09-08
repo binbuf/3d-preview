@@ -159,6 +159,7 @@
     <ClInclude Include="src\app\Preview3D.h" />
     <ClInclude Include="src\render\Renderer.h" />
     <ClInclude Include="src\app\Resource.h" />
+    <ClInclude Include="src\app\Settings.h" />
     <ClInclude Include="src\platform\ShellIntegration.h" />
     <ClInclude Include="src\app\targetver.h" />
   </ItemGroup>
@@ -168,6 +169,7 @@
     <ClCompile Include="src\render\Model.cpp" />
     <ClCompile Include="src\ui\NavGizmo.cpp" />
     <ClCompile Include="src\app\Preview3D.cpp" />
+    <ClCompile Include="src\app\Settings.cpp" />
     <ClCompile Include="src\render\Renderer.cpp" />
     <ClCompile Include="src\platform\ShellIntegration.cpp" />
   </ItemGroup>

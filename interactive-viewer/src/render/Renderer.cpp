@@ -261,6 +261,7 @@ const char* kVertexShader = R"(
 cbuffer Frame : register(b0)
 {
     row_major float4x4 viewProjection;
+    row_major float4x4 modelTransform;
     float4 cameraPosition;
     float4 options;
 };
@@ -283,9 +284,13 @@ struct VertexOutput
 VertexOutput main(VertexInput input)
 {
     VertexOutput output;
-    output.position = mul(float4(input.position, 1.0), viewProjection);
-    output.worldPosition = input.position;
-    output.normal = input.normal;
+    float4 worldPos = mul(float4(input.position, 1.0), modelTransform);
+    output.position = mul(worldPos, viewProjection);
+    output.worldPosition = worldPos.xyz;
+    // modelTransform is always a pure rotation (identity or a fixed axis
+    // correction, never scale/shear), so the raw 3x3 part transforms
+    // normals exactly without an inverse-transpose.
+    output.normal = mul(input.normal, (float3x3)modelTransform);
     output.color = input.color;
     return output;
 }
@@ -295,6 +300,7 @@ const char* kPixelShader = R"(
 cbuffer Frame : register(b0)
 {
     row_major float4x4 viewProjection;
+    row_major float4x4 modelTransform;
     float4 cameraPosition;
     float4 options;
 };
@@ -311,11 +317,11 @@ float4 main(PixelInput input) : SV_TARGET
 {
     float3 normal = normalize(input.normal);
     float3 viewDirection = normalize(cameraPosition.xyz - input.worldPosition);
-    float3 key = normalize(float3(-0.45, 0.82, -0.35));
-    float3 fill = normalize(float3(0.65, 0.25, 0.70));
+    float3 key = normalize(float3(-0.45, -0.35, 0.82));
+    float3 fill = normalize(float3(0.65, 0.70, 0.25));
     float keyLight = saturate(dot(normal, key));
     float fillLight = saturate(dot(normal, fill));
-    float hemisphere = lerp(0.18, 0.42, normal.y * 0.5 + 0.5);
+    float hemisphere = lerp(0.18, 0.42, normal.z * 0.5 + 0.5);
     float rim = pow(1.0 - saturate(dot(normal, viewDirection)), 3.0) * 0.12;
     float3 lit = input.color.rgb * (hemisphere + keyLight * 0.72 + fillLight * 0.18) + rim;
     // Mesh-selection highlight: a cool fresnel lift driven by options.x.
@@ -328,6 +334,7 @@ float4 main(PixelInput input) : SV_TARGET
 struct FrameConstants
 {
     XMFLOAT4X4 viewProjection{};
+    XMFLOAT4X4 modelTransform{};
     XMFLOAT4 cameraPosition{};
     XMFLOAT4 options{};
 };
@@ -365,8 +372,21 @@ double EaseFactor(double deltaSeconds, double tau)
 
 XMFLOAT4 DefaultOrientation()
 {
+    // Home view direction (eye - pivot, normalized), captured from a manually
+    // tuned camera placement and reproduced exactly rather than composed from
+    // round azimuth/elevation angles: +X, -Y and +Z, looking back toward
+    // -X/+Y/-Z. The eye is always pivot + rotate((0, 0, distance), q), so
+    // this offset is exactly the local +Z axis in world space; the rest of
+    // the basis (right/up) is filled in via cross products against the
+    // world-up axis, which reproduces the captured placement exactly (it was
+    // roll-free — its up vector already matched world-up x back).
+    const XMVECTOR worldUp = XMVectorSet(0, 0, 1, 0);
+    const XMVECTOR back = XMVector3Normalize(XMVectorSet(0.423293f, -0.83207f, 0.358444f, 0.0f));
+    const XMVECTOR right = XMVector3Normalize(XMVector3Cross(worldUp, back));
+    const XMVECTOR up = XMVector3Cross(back, right);
+    const XMMATRIX basis(right, up, back, XMVectorSet(0, 0, 0, 1));
     XMFLOAT4 result{};
-    XMStoreFloat4(&result, XMQuaternionRotationRollPitchYaw(-0.30f, 0.58f, 0.0f));
+    XMStoreFloat4(&result, XMQuaternionNormalize(XMQuaternionRotationMatrix(basis)));
     return result;
 }
 }
@@ -465,7 +485,7 @@ void Camera::SetFlySpeedScale(double scale)
 void Camera::ApplyOrbitAngles(float yawAngle, float pitchAngle)
 {
     XMVECTOR current = LoadOrientation(*this);
-    const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
+    const XMVECTOR worldUp = XMVectorSet(0, 0, 1, 0);
     // Turntable orbit: yaw about the world up axis, pitch about the camera
     // right axis. Composed as quaternion multiplies there is no Euler order
     // and no gimbal lock; the pole clamp below only keeps the horizon from
@@ -499,7 +519,7 @@ void Camera::Look(float deltaX, float deltaY)
         static_cast<float>(targetZ), 1.0f);
     const XMVECTOR eye = target + XMVector3Rotate(XMVectorSet(0, 0, static_cast<float>(distance), 0), current);
 
-    const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
+    const XMVECTOR worldUp = XMVectorSet(0, 0, 1, 0);
     // Yaw about world up, not the camera's local up: once the camera is
     // pitched, its local up axis is tilted, and yawing about it banks the
     // horizon instead of turning level. Unreal's editor free-look (and our
@@ -569,7 +589,7 @@ void Camera::Truck(float deltaX, float deltaY, float viewportHeight, bool axisSn
     if (viewportHeight <= 1.0f) return;
     lastViewportHeight = viewportHeight;
     const XMVECTOR current = LoadOrientation(*this);
-    const XMVECTOR worldUp = XMVectorSet(0, 1, 0, 0);
+    const XMVECTOR worldUp = XMVectorSet(0, 0, 1, 0);
     const XMVECTOR forward3 = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), current);
     const XMVECTOR right3 = XMVector3Rotate(XMVectorSet(1, 0, 0, 0), current);
     XMFLOAT3 forwardValue{};
@@ -577,21 +597,21 @@ void Camera::Truck(float deltaX, float deltaY, float viewportHeight, bool axisSn
     XMStoreFloat3(&forwardValue, forward3);
     XMStoreFloat3(&rightValue, right3);
 
-    XMVECTOR flatForward = XMVectorSet(forwardValue.x, 0, forwardValue.z, 0);
+    XMVECTOR flatForward = XMVectorSet(forwardValue.x, forwardValue.y, 0, 0);
     if (XMVectorGetX(XMVector3LengthSq(flatForward)) < 1e-6f)
     {
         // Looking straight up/down: right stays horizontal (pitch is applied
         // about it), so derive forward from it instead of leaving it
         // undefined, keeping truck direction continuous through the pole.
-        flatForward = XMVector3Cross(worldUp, XMVectorSet(rightValue.x, 0, rightValue.z, 0));
+        flatForward = XMVector3Cross(worldUp, XMVectorSet(rightValue.x, rightValue.y, 0, 0));
     }
     flatForward = XMVector3Normalize(flatForward);
-    XMVECTOR flatRight = XMVector3Normalize(XMVectorSet(rightValue.x, 0, rightValue.z, 0));
+    XMVECTOR flatRight = XMVector3Normalize(XMVectorSet(rightValue.x, rightValue.y, 0, 0));
     if (axisSnap)
     {
-        const float yaw = std::atan2(XMVectorGetX(flatForward), XMVectorGetZ(flatForward));
+        const float yaw = std::atan2(XMVectorGetX(flatForward), XMVectorGetY(flatForward));
         const float snapped = std::round(yaw / XM_PIDIV2) * XM_PIDIV2;
-        flatForward = XMVectorSet(std::sin(snapped), 0, std::cos(snapped), 0);
+        flatForward = XMVectorSet(std::sin(snapped), std::cos(snapped), 0, 0);
         flatRight = XMVector3Cross(flatForward, worldUp);
     }
 
@@ -600,8 +620,8 @@ void Camera::Truck(float deltaX, float deltaY, float viewportHeight, bool axisSn
     XMStoreFloat3(&forwardFlat, flatForward);
     XMStoreFloat3(&rightFlat, flatRight);
     const double unitsPerPixel = 2.0 * distance * std::tan(kVerticalFieldOfView * 0.5) / viewportHeight;
-    ShiftPivot((-rightFlat.x * deltaX + forwardFlat.x * deltaY) * unitsPerPixel, 0.0,
-        (-rightFlat.z * deltaX + forwardFlat.z * deltaY) * unitsPerPixel);
+    ShiftPivot((-rightFlat.x * deltaX + forwardFlat.x * deltaY) * unitsPerPixel,
+        (-rightFlat.y * deltaX + forwardFlat.y * deltaY) * unitsPerPixel, 0.0);
 }
 
 void Camera::Dolly(float wheelSteps)
@@ -956,8 +976,6 @@ struct Renderer::Impl
     ComPtr<ID3D11Buffer> gridBuffer;
     UINT indexCount = 0;
     UINT gridVertexCount = 0;
-    XMFLOAT3 boundsMin{};
-    XMFLOAT3 boundsMax{};
 
     ComPtr<ID2D1Factory> d2dFactory;
     ComPtr<IDWriteFactory> writeFactory;
@@ -1399,6 +1417,38 @@ struct Renderer::Impl
         overlayTarget->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumbX, trackY), Scale(7, scale), Scale(7, scale)), brush.Get());
     }
 
+    // Reusable "label + switch" row: a leading text label and a trailing
+    // pill-shaped on/off switch. Drawing only — SettingsPanel-related rects
+    // are hit-tested by Preview3D.cpp against the same rects this is given.
+    void DrawToggleRow(const D2D1_RECT_F& rowRect, const D2D1_RECT_F& switchRect,
+        const std::wstring& label, bool on, float scale)
+    {
+        DrawText(label, smallFormat.Get(),
+            D2D1::RectF(rowRect.left, rowRect.top, switchRect.left - Scale(8, scale), rowRect.bottom),
+            D2D1::ColorF(0xF5F5F7));
+        const float radius = (switchRect.bottom - switchRect.top) * 0.5f;
+        SetBrush(on ? D2D1::ColorF(0x0A84FF) : D2D1::ColorF(0x3A3A3C));
+        overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(switchRect, radius, radius), brush.Get());
+        const float thumbRadius = radius - Scale(2, scale);
+        const float thumbX = on ? switchRect.right - radius : switchRect.left + radius;
+        const float thumbY = (switchRect.top + switchRect.bottom) * 0.5f;
+        SetBrush(D2D1::ColorF(0xF5F5F7));
+        overlayTarget->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumbX, thumbY), thumbRadius, thumbRadius), brush.Get());
+    }
+
+    void DrawSettingsPanel(const OverlayInfo& overlay, float scale)
+    {
+        if (!overlay.settingsPanelOpen) return;
+        const D2D1_RECT_F panel = ToRectF(overlay.settingsPanelRect);
+        SetBrush(D2D1::ColorF(0x242426, 0.98f));
+        overlayTarget->FillRoundedRectangle(D2D1::RoundedRect(panel, Scale(10, scale), Scale(10, scale)), brush.Get());
+        SetBrush(D2D1::ColorF(0x3A3A3C));
+        overlayTarget->DrawRoundedRectangle(D2D1::RoundedRect(panel, Scale(10, scale), Scale(10, scale)), brush.Get(), 1.0f);
+
+        DrawToggleRow(ToRectF(overlay.settingsToggleRowRect), ToRectF(overlay.settingsSwitchRect),
+            L"Show model in its original orientation", overlay.showNativeOrientation, scale);
+    }
+
     // A small dark bubble naming the button under the cursor, shown once
     // Preview3D.cpp's hover-delay timer decides the pointer has parked on a
     // button for a while (see ComputeTooltipInfo). Anchored below title-bar
@@ -1602,12 +1652,13 @@ struct Renderer::Impl
         DrawInfoPanel(overlay, clientWidth, clientHeight, scale);
 
         // Navigation gizmo on top of everything else, except a floating
-        // flyout (Speed), which floats above even that.
+        // flyout (Speed, Settings), which floats above even that.
         if (overlay.state == ViewerState::Ready && overlay.hasModel)
         {
             DrawGizmo(camera, gizmo, scale);
         }
         DrawSpeedFlyout(overlay, scale);
+        DrawSettingsPanel(overlay, scale);
         DrawTooltip(overlay, clientWidth, scale);
 
         if (overlayTarget->EndDraw() == D2DERR_RECREATE_TARGET)
@@ -1617,17 +1668,21 @@ struct Renderer::Impl
         }
     }
 
-    bool CreateGrid(const ModelData& model, std::wstring& error)
+    // Takes explicit (already-effective, post-up-axis-correction) bounds
+    // rather than a whole ModelData, since the "show native orientation"
+    // toggle changes which bounds are active without re-uploading the model.
+    bool BuildGrid(const XMFLOAT3& boundsMin, const XMFLOAT3& boundsMax, std::wstring& error)
     {
         std::vector<ModelVertex> vertices;
-        const float centerX = (model.boundsMin.x + model.boundsMax.x) * 0.5f;
-        const float centerZ = (model.boundsMin.z + model.boundsMax.z) * 0.5f;
-        const float extentX = model.boundsMax.x - model.boundsMin.x;
-        const float extentY = model.boundsMax.y - model.boundsMin.y;
-        const float extentZ = model.boundsMax.z - model.boundsMin.z;
+        const float centerX = (boundsMin.x + boundsMax.x) * 0.5f;
+        const float centerY = (boundsMin.y + boundsMax.y) * 0.5f;
+        const float extentX = boundsMax.x - boundsMin.x;
+        const float extentY = boundsMax.y - boundsMin.y;
+        const float extentZ = boundsMax.z - boundsMin.z;
         const float radius = std::max(0.001f, std::sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ) * 0.5f);
         const float span = radius * 2.2f;
-        const float ground = model.boundsMin.y - radius * 0.012f;
+        // The ground plane is X-Y (Z is this app's up axis).
+        const float ground = boundsMin.z - radius * 0.012f;
         constexpr int divisions = 20;
         vertices.reserve((divisions + 1) * 4);
         for (int line = 0; line <= divisions; ++line)
@@ -1636,10 +1691,10 @@ struct Renderer::Impl
             const float offset = -span + 2.0f * span * t;
             const bool major = line == divisions / 2 || line % 5 == 0;
             const XMFLOAT4 color = major ? XMFLOAT4(0.22f, 0.25f, 0.30f, 0.52f) : XMFLOAT4(0.16f, 0.18f, 0.22f, 0.36f);
-            vertices.push_back({ XMFLOAT3(centerX - span, ground, centerZ + offset), XMFLOAT3(0, 1, 0), color });
-            vertices.push_back({ XMFLOAT3(centerX + span, ground, centerZ + offset), XMFLOAT3(0, 1, 0), color });
-            vertices.push_back({ XMFLOAT3(centerX + offset, ground, centerZ - span), XMFLOAT3(0, 1, 0), color });
-            vertices.push_back({ XMFLOAT3(centerX + offset, ground, centerZ + span), XMFLOAT3(0, 1, 0), color });
+            vertices.push_back({ XMFLOAT3(centerX - span, centerY + offset, ground), XMFLOAT3(0, 0, 1), color });
+            vertices.push_back({ XMFLOAT3(centerX + span, centerY + offset, ground), XMFLOAT3(0, 0, 1), color });
+            vertices.push_back({ XMFLOAT3(centerX + offset, centerY - span, ground), XMFLOAT3(0, 0, 1), color });
+            vertices.push_back({ XMFLOAT3(centerX + offset, centerY + span, ground), XMFLOAT3(0, 0, 1), color });
         }
         D3D11_BUFFER_DESC description{};
         description.ByteWidth = static_cast<UINT>(vertices.size() * sizeof(ModelVertex));
@@ -1836,11 +1891,15 @@ bool Renderer::UploadModel(const ModelData& model, std::wstring& error)
     impl_->vertexBuffer = std::move(vertexBuffer);
     impl_->indexBuffer = std::move(indexBuffer);
     impl_->indexCount = static_cast<UINT>(model.indices.size());
-    impl_->boundsMin = model.boundsMin;
-    impl_->boundsMax = model.boundsMax;
+    return true;
+}
+
+bool Renderer::RebuildGrid(const XMFLOAT3& boundsMin, const XMFLOAT3& boundsMax, std::wstring& error)
+{
+    if (!impl_->device) return false;
     impl_->gridBuffer.Reset();
     impl_->gridVertexCount = 0;
-    return impl_->CreateGrid(model, error);
+    return impl_->BuildGrid(boundsMin, boundsMax, error);
 }
 
 void Renderer::ClearModel()
@@ -1890,7 +1949,6 @@ void Renderer::Render(const Camera& camera, const OverlayInfo& overlay, const Na
     XMStoreFloat4x4(&constants.viewProjection, view * projection);
     XMStoreFloat4(&constants.cameraPosition, eye);
     constants.options = XMFLOAT4(overlay.selectionAmount, 0.0f, 0.0f, 0.0f);
-    impl_->context->UpdateSubresource(impl_->constantBuffer.Get(), 0, nullptr, &constants, 0, 0);
     ID3D11Buffer* constantBuffer = impl_->constantBuffer.Get();
     impl_->context->VSSetConstantBuffers(0, 1, &constantBuffer);
     impl_->context->PSSetConstantBuffers(0, 1, &constantBuffer);
@@ -1899,6 +1957,10 @@ void Renderer::Render(const Camera& camera, const OverlayInfo& overlay, const Na
     const UINT offsetBytes = 0;
     if (!loading && impl_->gridBuffer && overlay.gridVisible)
     {
+        // The grid always stays in the app's fixed Z-up world, regardless of
+        // the model's own up-axis correction/toggle.
+        XMStoreFloat4x4(&constants.modelTransform, XMMatrixIdentity());
+        impl_->context->UpdateSubresource(impl_->constantBuffer.Get(), 0, nullptr, &constants, 0, 0);
         ID3D11Buffer* grid = impl_->gridBuffer.Get();
         impl_->context->IASetVertexBuffers(0, 1, &grid, &stride, &offsetBytes);
         impl_->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
@@ -1906,6 +1968,8 @@ void Renderer::Render(const Camera& camera, const OverlayInfo& overlay, const Na
     }
     if (!loading && impl_->vertexBuffer && impl_->indexBuffer)
     {
+        constants.modelTransform = overlay.modelTransform;
+        impl_->context->UpdateSubresource(impl_->constantBuffer.Get(), 0, nullptr, &constants, 0, 0);
         ID3D11Buffer* vertices = impl_->vertexBuffer.Get();
         impl_->context->IASetVertexBuffers(0, 1, &vertices, &stride, &offsetBytes);
         impl_->context->IASetIndexBuffer(impl_->indexBuffer.Get(), DXGI_FORMAT_R32_UINT, 0);

@@ -75,6 +75,11 @@ struct OverlayInfo
     RECT speedFlyoutTrackRect{};   // the draggable track within it
     float speedSliderT = 0.0f;     // 0..1 normalized thumb position
     std::wstring speedValueText;   // e.g. "×1.00"
+    bool settingsPanelOpen = false;
+    RECT settingsPanelRect{};        // client px, valid only while settingsPanelOpen
+    RECT settingsToggleRowRect{};
+    RECT settingsSwitchRect{};
+    bool showNativeOrientation = false;   // current value, for drawing the switch's on/off state
     float selectionAmount = 0.0f;   // 0..1 mesh-selection highlight
     std::wstring speedHud;          // transient fly-speed readout
     float speedHudAlpha = 0.0f;
@@ -84,6 +89,16 @@ struct OverlayInfo
     RECT tooltipAnchorRect{};       // client px, the hovered button this tooltip describes
     std::wstring tooltipText;
     bool tooltipBelow = true;       // true: title-bar buttons (bubble drawn below); false: bottom-bar buttons (drawn above)
+    // Root transform applied to the model draw only (never the grid) — see
+    // Model.h's ModelData::upAxisCorrection. Identity unless the loaded
+    // model's native orientation differs from this app's Z-up world and the
+    // "show native orientation" setting is off.
+    DirectX::XMFLOAT4X4 modelTransform = []
+    {
+        DirectX::XMFLOAT4X4 identity{};
+        DirectX::XMStoreFloat4x4(&identity, DirectX::XMMatrixIdentity());
+        return identity;
+    }();
 };
 
 // Per-frame navigation intents gathered from keyboard state. The camera eases
@@ -229,6 +244,11 @@ public:
     bool Initialize(HWND window, std::wstring& error);
     bool Resize(int width, int height, std::wstring& error);
     bool UploadModel(const ModelData& model, std::wstring& error);
+    // Rebuilds the ground-grid buffer from explicit bounds — decoupled from
+    // UploadModel because the "show native orientation" toggle changes the
+    // active/effective bounds (see Model.h's TransformBounds) without
+    // re-uploading or re-parsing the model itself.
+    bool RebuildGrid(const DirectX::XMFLOAT3& boundsMin, const DirectX::XMFLOAT3& boundsMax, std::wstring& error);
     void ClearModel();
     void Render(const Camera& camera, const OverlayInfo& overlay, const NavGizmo& gizmo, const Chrome& chrome);
     bool HasModel() const;
