@@ -73,7 +73,11 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <AdditionalOptions>/permissive- /utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>src\app;src\render;src\ui;src\platform;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>src\app;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
     <Link>
       <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;d2d1.lib;dwrite.lib;dwmapi.lib;comctl32.lib;shell32.lib;ole32.lib;runtimeobject.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
@@ -147,32 +151,32 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="framework.h" />
-    <ClInclude Include="Chrome.h" />
-    <ClInclude Include="InfoPanel.h" />
-    <ClInclude Include="Model.h" />
-    <ClInclude Include="NavGizmo.h" />
-    <ClInclude Include="Preview3D.h" />
-    <ClInclude Include="Renderer.h" />
-    <ClInclude Include="Resource.h" />
-    <ClInclude Include="ShellIntegration.h" />
-    <ClInclude Include="targetver.h" />
+    <ClInclude Include="src\app\framework.h" />
+    <ClInclude Include="src\ui\Chrome.h" />
+    <ClInclude Include="src\ui\InfoPanel.h" />
+    <ClInclude Include="src\render\Model.h" />
+    <ClInclude Include="src\ui\NavGizmo.h" />
+    <ClInclude Include="src\app\Preview3D.h" />
+    <ClInclude Include="src\render\Renderer.h" />
+    <ClInclude Include="src\app\Resource.h" />
+    <ClInclude Include="src\platform\ShellIntegration.h" />
+    <ClInclude Include="src\app\targetver.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Chrome.cpp" />
-    <ClCompile Include="InfoPanel.cpp" />
-    <ClCompile Include="Model.cpp" />
-    <ClCompile Include="NavGizmo.cpp" />
-    <ClCompile Include="Preview3D.cpp" />
-    <ClCompile Include="Renderer.cpp" />
-    <ClCompile Include="ShellIntegration.cpp" />
+    <ClCompile Include="src\ui\Chrome.cpp" />
+    <ClCompile Include="src\ui\InfoPanel.cpp" />
+    <ClCompile Include="src\render\Model.cpp" />
+    <ClCompile Include="src\ui\NavGizmo.cpp" />
+    <ClCompile Include="src\app\Preview3D.cpp" />
+    <ClCompile Include="src\render\Renderer.cpp" />
+    <ClCompile Include="src\platform\ShellIntegration.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="Preview3D.rc" />
+    <ResourceCompile Include="resources\Preview3D.rc" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="Preview3D.ico" />
-    <Image Include="small.ico" />
+    <Image Include="resources\Preview3D.ico" />
+    <Image Include="resources\small.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

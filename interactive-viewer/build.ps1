@@ -10,8 +10,9 @@ $ErrorActionPreference = 'Stop'
 
 $configuration = if ($Release) { 'Release' } else { 'Debug' }
 $platform = 'x64'
-$projectPath = Join-Path $PSScriptRoot 'Preview3D.vcxproj'
-$executablePath = Join-Path $PSScriptRoot "$platform\$configuration\Preview3D.exe"
+$projectRoot = $PSScriptRoot
+$projectPath = Join-Path $projectRoot 'Preview3D.vcxproj'
+$executablePath = Join-Path $projectRoot "$platform\$configuration\Preview3D.exe"
 
 function Find-MSBuild {
     $command = Get-Command 'MSBuild.exe' -ErrorAction SilentlyContinue
@@ -67,5 +68,5 @@ if ($Run) {
     }
 
     Write-Host 'Starting Preview3D...'
-    Start-Process -FilePath $executablePath -WorkingDirectory $PSScriptRoot
+    Start-Process -FilePath $executablePath -WorkingDirectory $projectRoot
 }

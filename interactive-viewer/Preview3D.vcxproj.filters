@@ -13,72 +13,96 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Source Files\app">
+      <UniqueIdentifier>{9a1c1f10-0b1a-4a2a-9b1a-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\render">
+      <UniqueIdentifier>{9a1c1f10-0b1a-4a2a-9b1a-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\ui">
+      <UniqueIdentifier>{9a1c1f10-0b1a-4a2a-9b1a-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\platform">
+      <UniqueIdentifier>{9a1c1f10-0b1a-4a2a-9b1a-000000000004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\app">
+      <UniqueIdentifier>{9a1c1f10-0b1a-4a2a-9b1a-000000000005}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\render">
+      <UniqueIdentifier>{9a1c1f10-0b1a-4a2a-9b1a-000000000006}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\ui">
+      <UniqueIdentifier>{9a1c1f10-0b1a-4a2a-9b1a-000000000007}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\platform">
+      <UniqueIdentifier>{9a1c1f10-0b1a-4a2a-9b1a-000000000008}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="framework.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\app\framework.h">
+      <Filter>Header Files\app</Filter>
     </ClInclude>
-    <ClInclude Include="targetver.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\app\targetver.h">
+      <Filter>Header Files\app</Filter>
     </ClInclude>
-    <ClInclude Include="Resource.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\app\Resource.h">
+      <Filter>Header Files\app</Filter>
     </ClInclude>
-    <ClInclude Include="Preview3D.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\app\Preview3D.h">
+      <Filter>Header Files\app</Filter>
     </ClInclude>
-    <ClInclude Include="Model.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\render\Model.h">
+      <Filter>Header Files\render</Filter>
     </ClInclude>
-    <ClInclude Include="Renderer.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\render\Renderer.h">
+      <Filter>Header Files\render</Filter>
     </ClInclude>
-    <ClInclude Include="NavGizmo.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\ui\NavGizmo.h">
+      <Filter>Header Files\ui</Filter>
     </ClInclude>
-    <ClInclude Include="InfoPanel.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\ui\InfoPanel.h">
+      <Filter>Header Files\ui</Filter>
     </ClInclude>
-    <ClInclude Include="Chrome.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\ui\Chrome.h">
+      <Filter>Header Files\ui</Filter>
     </ClInclude>
-    <ClInclude Include="ShellIntegration.h">
-      <Filter>Header Files</Filter>
+    <ClInclude Include="src\platform\ShellIntegration.h">
+      <Filter>Header Files\platform</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Preview3D.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\app\Preview3D.cpp">
+      <Filter>Source Files\app</Filter>
     </ClCompile>
-    <ClCompile Include="Model.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\render\Model.cpp">
+      <Filter>Source Files\render</Filter>
     </ClCompile>
-    <ClCompile Include="Renderer.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\render\Renderer.cpp">
+      <Filter>Source Files\render</Filter>
     </ClCompile>
-    <ClCompile Include="NavGizmo.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\ui\NavGizmo.cpp">
+      <Filter>Source Files\ui</Filter>
     </ClCompile>
-    <ClCompile Include="InfoPanel.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\ui\InfoPanel.cpp">
+      <Filter>Source Files\ui</Filter>
     </ClCompile>
-    <ClCompile Include="Chrome.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\ui\Chrome.cpp">
+      <Filter>Source Files\ui</Filter>
     </ClCompile>
-    <ClCompile Include="ShellIntegration.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="src\platform\ShellIntegration.cpp">
+      <Filter>Source Files\platform</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="Preview3D.rc">
+    <ResourceCompile Include="resources\Preview3D.rc">
       <Filter>Resource Files</Filter>
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <Image Include="small.ico">
+    <Image Include="resources\small.ico">
       <Filter>Resource Files</Filter>
     </Image>
-    <Image Include="Preview3D.ico">
+    <Image Include="resources\Preview3D.ico">
       <Filter>Resource Files</Filter>
     </Image>
   </ItemGroup>

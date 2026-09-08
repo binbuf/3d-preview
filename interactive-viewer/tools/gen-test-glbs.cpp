@@ -64,7 +64,7 @@ int wmain()
         std::vector<std::uint8_t> bin;
         for (const auto& p : kTriangle) { AppendF32(bin, p[0]); AppendF32(bin, p[1]); AppendF32(bin, p[2]); }
         AppendU32(bin, 0); AppendU32(bin, 1); AppendU32(bin, 2);
-        WriteGlb(L"D:\\repos\\binbuf\\3d-preview-windows\\interactive-viewer\\tri_tight.glb", json, bin);
+        WriteGlb(L"D:\\repos\\binbuf\\3d-preview-windows\\interactive-viewer\\test-assets\\tri_tight.glb", json, bin);
     }
 
     // GLB 2: interleaved strided positions+normals -> exercises strided path
@@ -84,7 +84,7 @@ int wmain()
             AppendF32(bin, 0.0f); AppendF32(bin, 0.0f); AppendF32(bin, 1.0f);
         }
         AppendU32(bin, 0); AppendU32(bin, 1); AppendU32(bin, 2);
-        WriteGlb(L"D:\\repos\\binbuf\\3d-preview-windows\\interactive-viewer\\tri_interleaved.glb", json, bin);
+        WriteGlb(L"D:\\repos\\binbuf\\3d-preview-windows\\interactive-viewer\\test-assets\\tri_interleaved.glb", json, bin);
     }
     return 0;
 }
