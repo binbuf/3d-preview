@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <!--
+    Companion to Directory.Build.props, imported at the end of every
+    project's evaluation via Microsoft.Cpp.targets. Empty for now — this is
+    the deliberate hook point for build-policy targets (e.g. a shared
+    post-build SBOM/notice step) called for in
+    .docs/design/10-delivery-plan.md, added when a later gate needs one,
+    rather than growing ad hoc per-project post-build steps.
+  -->
+</Project>
