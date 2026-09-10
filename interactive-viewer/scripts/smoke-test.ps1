@@ -1,4 +1,10 @@
-param([string]$GlbPath, [string]$ShotPath, [int]$WaitSeconds = 5)
+param(
+    [string]$GlbPath,
+    [string]$ShotPath,
+    [int]$WaitSeconds = 5,
+    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
+    [string]$ExePath
+)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
@@ -18,7 +24,21 @@ public class Win32Shot {
 # Per-Monitor V2 DPI awareness so coordinates and captures are physical.
 [Win32Shot]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
 
-$exe = 'D:\repos\binbuf\3d-preview-windows\interactive-viewer\x64\Release\Preview3D.exe'
+# Resolve the viewer from the *solution* output directory. The previous value
+# here was an absolute, machine-specific path into interactive-viewer\x64\Release
+# -- the project-level output tree, which a solution build never writes to. See
+# .docs/PROGRESS.md, "Building a .vcxproj directly makes 85 of 135
+# import-isolation tests fail", for why those two trees existing side by side is
+# a trap rather than a convenience.
+if (-not $ExePath) {
+    $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+    $ExePath = Join-Path $repositoryRoot "x64\$Configuration\Preview3D.exe"
+}
+if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
+    Write-Host "FAILED: Preview3D.exe not found at '$ExePath'. Build it with .\scripts\build.ps1 -Configuration $Configuration."
+    exit 1
+}
+$exe = $ExePath
 $p = Start-Process -FilePath $exe -ArgumentList "`"$GlbPath`"" -PassThru
 Start-Sleep -Seconds $WaitSeconds
 $p.Refresh()
