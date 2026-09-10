@@ -1,0 +1,98 @@
+3D Preview
+Copyright 2026 binbuf (https://github.com/binbuf)
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+================================================================================
+Third-party components
+================================================================================
+
+3D Preview links, or is pinned to link, the components below. Their full,
+verbatim licence texts are in third_party/notices/, one file per component,
+copied from the licence each project ships. Versions are the ones resolved by
+vcpkg.json against the registry baseline pinned in vcpkg-configuration.json.
+
+Linked into shipping binaries today
+-----------------------------------
+
+  fastgltf 0.9.0                MIT
+      Copyright (c) 2022-2025 Sean Apeler
+      glTF 2.0 / GLB parsing, inside Preview3DImportWorker.exe.
+      third_party/notices/fastgltf.txt
+
+  Draco 1.5.7                   Apache-2.0
+      Copyright The Draco Authors (Google LLC)
+      Compressed glTF geometry decode, inside Preview3DImportWorker.exe.
+      third_party/notices/draco.txt
+
+  KTX-Software 4.4.2            Apache-2.0
+      Copyright 2013-2020 Mark Callow and the KTX-Software contributors
+      KTX2 container handling and Basis transcode.
+      third_party/notices/ktx.txt
+
+  Basis Universal 2.50          Apache-2.0, plus bundled components under
+                                other licences -- see the notice file
+      Copyright Binomial LLC
+      Supercompressed texture transcode, reached through KTX-Software.
+      third_party/notices/basisu.txt
+
+Test-only, not redistributed in product binaries
+------------------------------------------------
+
+  Catch2 3.16.0                 BSL-1.0
+      Test framework for Tests.Unit and Tests.ImportIsolation.
+      third_party/notices/catch2.txt
+
+Pinned but not yet linked
+-------------------------
+
+Listed here because vcpkg.json pins them and vcpkg's autolink places the whole
+triplet's lib\*.lib on the link line, so an unwired dependency is not inert.
+Each is consumed by a Gate 3 deliverable that has not landed. Tracked as risk
+R-22 in .docs/design/11-decisions-and-risks.md, whose contingency is explicit:
+if one of these is still unwired when its slice is cut or deferred, remove it
+from vcpkg.json rather than carry an unreviewed dependency.
+
+  meshoptimizer 1.2             MIT (vendors cgltf and fast_obj, both MIT)
+      Copyright (c) 2016-2026 Arseny Kapoulkine
+      For the Gate 3 deliverable 6 cluster LOD/proxy builder.
+      third_party/notices/meshoptimizer.txt
+
+  DirectXTex (2026-05-07)       MIT
+      Copyright (c) Microsoft Corporation
+      For the Gate 3 deliverable 7 TGA/HDR/DDS paths.
+      third_party/notices/directxtex.txt
+
+  libwebp 1.6.0                 BSD-3-Clause
+      Copyright (c) 2010, Google Inc.
+      For the Gate 3 deliverable 7 WebP path and glTF EXT_texture_webp.
+      third_party/notices/libwebp.txt
+
+================================================================================
+Other assets
+================================================================================
+
+Application and UI icons are from Flaticon and require attribution:
+
+  Geometric icons created by Magnific   -- https://www.flaticon.com/free-icons/geometric
+  Perspective icons created by Iconir   -- https://www.flaticon.com/free-icons/perspective
+  Grid icons created by Magnific        -- https://www.flaticon.com/free-icons/grid
+  Speed icons created by Magnific       -- https://www.flaticon.com/free-icons/speed
+
+================================================================================
+Scope
+================================================================================
+
+This file is the licence-compliance half of Gate 0's "dependency lock/licensing
+skeleton" (.docs/design/10-delivery-plan.md:72) and of release acceptance
+criterion 8 in .docs/design/01-product-scope.md, which requires dependency
+notices to be archived with the release.
+
+It is NOT the SBOM. NFR-12 requires toolchain, shaders, parsers, decoders,
+transcoders, allocator and every transitive dependency to be represented in a
+release SBOM; that is generated as part of Gate 7 and does not exist yet.
+
+Adding or updating a dependency requires the change-control checklist in
+.docs/design/10-delivery-plan.md:283 -- limits, error semantics, parser threat
+review, fuzz corpus, thumbnail decision, dependency/licence entry, and
+performance classification -- and an update to this file in the same change.
