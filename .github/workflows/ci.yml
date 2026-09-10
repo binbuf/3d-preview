@@ -1,0 +1,131 @@
+# Gate 0's "repository ignores and CI build/unit-test job"
+# (.docs/design/10-delivery-plan.md:73), which stayed open while 221 Catch2
+# cases accumulated and were run by hand out of x64\<Config>\.
+#
+# What this job is actually for
+# -----------------------------
+# Not just "do the tests pass". .docs/PROGRESS.md records three separate
+# occasions where the *build environment* produced a failure that read as a
+# source defect, each costing real time:
+#
+#   1. MSBuild's IncrementalClean deleting the five vcpkg DLLs that
+#      AppLocalFromInstalled had just deployed (PROGRESS.md:55);
+#   2. release /MD vcpkg DLLs sitting in x64\Debug next to /MDd binaries, which
+#      made fastgltf return a structurally impossible Asset and then corrupt the
+#      heap -- invisible to source-level bisection (PROGRESS.md:312);
+#   3. building an individual .vcxproj, leaving $(SolutionDir) undefined and
+#      failing 85 of 135 import-isolation tests in a way that looks exactly like
+#      a broken sandbox (PROGRESS.md:287).
+#
+# All three are stale- or wrong-output-tree faults. A clean checkout that always
+# builds the solution cannot reproduce any of them, which is most of the value
+# here.
+
+name: CI
+
+on:
+  # Every branch, not just main: the point of this job is to catch a
+  # build-environment or clean-checkout problem before it reaches main, and a
+  # main-only trigger cannot do that.
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.configuration }} x64
+
+    # Pinned to the explicit VS 2026 image rather than windows-latest.
+    # Directory.Build.props pins PlatformToolset=v145, which VS 2022 does not
+    # carry, and NFR-12 (reproducibility) wants the toolchain named rather than
+    # inherited from whatever the "latest" label points at this month.
+    runs-on: windows-2025-vs2026
+
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # vcpkg_installed/ holds both the debug and release halves of every
+      # dependency, so one cache entry serves both matrix legs. Keyed on the
+      # manifest *and* the pinned registry baseline: either changing must
+      # invalidate it, or the build silently links yesterday's dependency.
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: Report toolchain
+        shell: pwsh
+        run: |
+          Write-Host "MSBuild: $((Get-Command MSBuild.exe).Source)"
+          & MSBuild.exe -version
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          & $vswhere -latest -prerelease -products * -format value `
+            -property catalog_productDisplayVersion
+          Write-Host "Available platform toolsets:"
+          Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\MSBuild\Microsoft\VC\*\Platforms\x64\PlatformToolsets' `
+            -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem $_.FullName -Directory } |
+            Select-Object -ExpandProperty Name -Unique
+
+      - name: Build solution
+        shell: pwsh
+        run: .\scripts\build.ps1 -Configuration ${{ matrix.configuration }}
+
+      # Two suites, run as separate steps so a failure names the boundary it
+      # crossed rather than just reddening one "test" step.
+      #
+      # Tests.Unit runs with '~[graphics]' here: 45 of its 71 cases need a D3D12
+      # adapter, and hosted runners have none. Forcing WARP via
+      # PREVIEW3D_TEST_FORCE_WARP is wired up (see tests/unit/GraphicsTestSupport.h)
+      # but the full [graphics] set still aborts in aggregate under WARP, so
+      # claiming it here would be claiming coverage that does not exist. Those 45
+      # cases run on a machine with a real adapter until that is diagnosed.
+      - name: Test -- Tests.Unit (excluding [graphics])
+        shell: pwsh
+        run: |
+          .\scripts\run-tests.ps1 `
+            -NoBuild `
+            -Configuration ${{ matrix.configuration }} `
+            -Suite Unit `
+            -CatchArgs '~[graphics]'
+
+      # No GPU needed: this is the AppContainer sandbox, the broker protocol, the
+      # shared-section validator, every format adapter, and the hostile-worker
+      # containment suite. It does launch real sandboxed child processes and
+      # create an AppContainer profile, so it is the step most likely to be
+      # sensitive to the runner's security configuration.
+      - name: Test -- Tests.ImportIsolation
+        shell: pwsh
+        run: |
+          .\scripts\run-tests.ps1 `
+            -NoBuild `
+            -Configuration ${{ matrix.configuration }} `
+            -Suite ImportIsolation
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.configuration }}
+          path: TestResults/*.xml
+          if-no-files-found: warn
