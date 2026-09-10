@@ -61,6 +61,47 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
+      # Directory.Build.props sets VcpkgEnableManifest=true and names no vcpkg
+      # root, so the build relies on *something* having installed vcpkg's MSBuild
+      # integration. On a developer machine that something is Visual Studio,
+      # which bundles vcpkg under <VS>\VC\vcpkg\ and wires the integration in.
+      #
+      # The hosted image's Visual Studio does not, and the failure mode is
+      # silent rather than loud: the property is set, nothing consumes it, no
+      # vcpkg step appears in the log at all, and the build goes straight to
+      # compiling with no include directories and no autolink. It surfaces as
+      # every vcpkg header being missing at once --
+      # "C1083: Cannot open include file: 'catch2/catch_test_macros.hpp'",
+      # 'fastgltf/core.hpp', 'draco/compression/decode.h', 'ktx.h' -- which reads
+      # like a broken checkout rather than a missing integration.
+      #
+      # So name it explicitly rather than inherit it. The runner ships a
+      # standalone vcpkg at VCPKG_INSTALLATION_ROOT; 'integrate install' gives it
+      # the same user-wide MSBuild integration Visual Studio would have provided.
+      # This does not weaken NFR-12: what pins the dependency versions is the
+      # registry baseline in vcpkg-configuration.json, not which copy of the
+      # vcpkg *tool* performs the install.
+      - name: Enable vcpkg MSBuild integration
+        shell: pwsh
+        run: |
+          $candidates = @()
+          if ($env:VCPKG_INSTALLATION_ROOT) {
+              $candidates += (Join-Path $env:VCPKG_INSTALLATION_ROOT 'vcpkg.exe')
+          }
+          $candidates += (Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\VC\vcpkg\vcpkg.exe' `
+                              -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+
+          $vcpkg = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+          if (-not $vcpkg) {
+              Write-Host '::error::No vcpkg found. Looked at VCPKG_INSTALLATION_ROOT and every Visual Studio VC\vcpkg directory.'
+              exit 1
+          }
+
+          Write-Host "vcpkg: $vcpkg"
+          & $vcpkg version
+          & $vcpkg integrate install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       # vcpkg_installed/ holds both the debug and release halves of every
       # dependency, so one cache entry serves both matrix legs. Keyed on the
       # manifest *and* the pinned registry baseline: either changing must
@@ -86,6 +127,14 @@ jobs:
             -ErrorAction SilentlyContinue |
             ForEach-Object { Get-ChildItem $_.FullName -Directory } |
             Select-Object -ExpandProperty Name -Unique
+
+          # The build depends on a vcpkg MSBuild integration existing. When it
+          # does not, the build fails with missing third-party headers and says
+          # nothing about vcpkg at all, so report it here where it is legible.
+          Write-Host "VCPKG_INSTALLATION_ROOT: $($env:VCPKG_INSTALLATION_ROOT)"
+          $bundled = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\VC\vcpkg\vcpkg.exe' `
+                         -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+          Write-Host "Visual-Studio-bundled vcpkg: $(if ($bundled) { $bundled -join ', ' } else { '(none)' })"
 
       - name: Build solution
         shell: pwsh
