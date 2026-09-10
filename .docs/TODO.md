@@ -6,7 +6,7 @@ This is the forward-looking companion to [PROGRESS.md](./PROGRESS.md): that file
 happened and what surprised us, this one records what is left. Neither replaces the design docs —
 when they disagree, `.docs/design/` wins and this file is what needs fixing.
 
-**Accurate as of `f0d2f86`** ("Let one generation hand over the output window more than once").
+**Accurate as of `5f896d8`** ("Move ci-local's clone off TEMP and onto a short path").
 
 Two rules this list is written to, both from the delivery plan itself:
 
@@ -19,7 +19,7 @@ Two rules this list is written to, both from the delivery plan itself:
 
 | Gate | Deliverables | Exit criteria | State |
 | --- | --- | --- | --- |
-| 0 — foundations | 4 of 7 partly open | 1 of 5 open | Primitives landed; CI, SBOM, ETW schema and fixture manifest never did |
+| 0 — foundations | 3 of 7 partly open | 1 of 5 open | CI and licences landed; SBOM, ETW schema and fixture manifest still open |
 | 1 — responsive native shell | 5 of 6 partly open | 5 of 5 open | Renderer built; shell obligations and all evidence outstanding |
 | 2 — streaming proof + import sandbox | done | 2 of 8 open | Deliverables complete; three components never wired into the app |
 | 3 — Tier A formats | 7.5 of 11 open | 6 of 6 open | **Current gate.** Both structural blockers now closed |
@@ -40,10 +40,27 @@ removed what stood in front of the work; the work itself is below.
 Seven deliverables (`10-…:67-73`). The primitives all landed; four deliverables have a half that
 did not, and each is still owed.
 
-- [ ] **CI build/unit-test job** (`10-…:73`). Nothing exists: no `.github/`, no pipeline file, no
-      MSBuild test target, no ctest. Both Catch2 binaries are run by hand out of `x64\<Config>\`.
-- [ ] **Licensing skeleton and SBOM draft** (`10-…:72`, exit `10-…:80`). No SBOM, NOTICE or LICENSE
-      file anywhere. `vcpkg.json` pins versions, which is the dependency-lock half only.
+- [x] **CI build/unit-test job** (`10-…:73`). `.github/workflows/ci.yml` runs on every push,
+      pinned to `windows-2025-vs2026` because `Directory.Build.props` pins `PlatformToolset=v145`.
+      `scripts/build.ps1` and `scripts/run-tests.ps1` are the shared entry points; both always
+      build the solution. `scripts/ci-local.ps1` runs the same checks from a clean clone with a
+      real GPU.
+  - [ ] **45 of Tests.Unit's 71 cases do not run in hosted CI.** They are `[graphics]` and need a
+        D3D12 adapter; hosted runners have none, and a self-hosted runner is out because this
+        repository is public. Hosted CI covers 176 of 221 cases; `ci-local.ps1` covers all 221.
+        `tests/unit/GraphicsTestSupport.h` has the `PREVIEW3D_TEST_FORCE_WARP` seam that would
+        close this, and records why it does not yet: individual `[graphics]` cases pass under
+        WARP, but the full `[graphics]~[hardware]` set aborts with exit code 125 partway through,
+        taking Catch2's buffered output with it. Fine one at a time and fatal in aggregate points
+        at process-wide state across the swap chain, the D2D bridge and the upload ring sharing
+        one WARP device. **Do not close this by relaxing ADR-009.**
+- [x] **Licensing skeleton** (`10-…:72`). `LICENSE` (Apache-2.0, verbatim), `NOTICE` indexing all
+      eight dependencies by resolved version, and `third_party/notices/` carrying each project's
+      licence text as vcpkg ships it. `NOTICE` splits them honestly into linked-today, test-only,
+      and pinned-but-unwired (the R-22 three).
+- [ ] **SBOM draft** (exit `10-…:80`). Still open, and deliberately not implied by `NOTICE`, which
+      says so. `NFR-12` wants toolchain, Agility SDK, shaders, parsers, decoders/transcoders,
+      allocator and every transitive dependency represented. Gate 7 work.
 - [ ] **ETW event schema** (`10-…:71`). `FrameStats.{h,cpp}` is a 240-sample mean/p95 ring and is
       explicitly not this. Everything that measures a frame gate downstream — Gate 1's NFR-03
       criteria, Gate 3's exit criterion 1, `09-…:87`'s present-event classification — needs it.
@@ -58,9 +75,17 @@ did not, and each is still owed.
 
 Done: build policy and x64-only project graph; RAII wrappers for HANDLE, mapping/view, COM pointer,
 event and checked arithmetic; the cancellation/generation primitive (`platform/Generation.h`);
-derived-cache schema/key/checksum interfaces; test framework; repository ignores. Exit criteria met
-except the SBOM draft: clean-clone Debug/Release build on the pinned toolchain, one test per
-foundation primitive, warnings/security flags inspected, no wizard global mutable window state.
+derived-cache schema/key/checksum interfaces; test framework; repository ignores; CI job and shared
+build/test entry points; licence and third-party notices. Exit criteria met except the SBOM draft:
+clean-clone Debug/Release build on the pinned toolchain, one test per foundation primitive,
+warnings/security flags inspected, no wizard global mutable window state.
+
+The clean-clone half of that first exit criterion is now actually *executed* rather than asserted,
+by `ci-local.ps1` and by CI, which matters more here than it sounds: all three environment traps in
+PROGRESS.md are stale- or wrong-output-tree faults that a fresh checkout cannot reproduce. Running
+it immediately found a fourth, recorded in PROGRESS.md — a clone under a long `$env:TEMP` path
+fails to build draco from source with a `C1083` that reads like a broken dependency and is a
+MAX_PATH failure.
 
 ---
 
@@ -416,8 +441,10 @@ product, engineering, security and installer owners sign the same artifact manif
 
 ## Cross-cutting
 
-- [ ] **No CI** (Gate 0). Everything below is run by hand, which is why regressions are caught by
-      discipline rather than by tooling.
+- [x] **CI** (Gate 0). `.github/workflows/ci.yml` on every push, plus `scripts/ci-local.ps1` for a
+      clean-clone run with a GPU. Regressions in the 176 hosted-covered cases are now caught by
+      tooling; the 45 `[graphics]` cases still depend on someone running `ci-local.ps1` before
+      pushing.
 - [ ] **No perf or memory harness and no fixture corpus.** Blocks Gate 1's NFR-03 criteria and Gate
       3's exit criteria 1 and 4. Probably two chunks of work on its own.
 - [ ] **`ModelCore.vcxproj` is a stub** — `shared/model-core/src/ModelCore.cpp` is nine lines whose
@@ -430,10 +457,13 @@ product, engineering, security and installer owners sign the same artifact manif
       7.2–9.0 ms across repeat runs and occasionally crosses NFR-04's 8.3 ms gate, and **must be
       re-measured against the real ported chrome**, with dirty-tracking as the first remedy; 2 done;
       3 partial; **4, 5, 6, 7, 8, 9 open**.
-- [ ] **Broken tooling**: `interactive-viewer/tools/build-test-loader.ps1:14` references a
-      `test-loader.cpp` that does not exist, and hardcodes an MSVC version path.
-      `interactive-viewer/scripts/smoke-test.ps1` hardcodes the *project-level* Release path, which
-      is not where a solution build puts the exe.
+- [x] **Broken tooling**. `build-test-loader.ps1` removed (it referenced a `test-loader.cpp` that
+      has never existed here). `smoke-test.ps1` and `smoke-empty.ps1` now resolve the viewer from
+      the solution output directory instead of hardcoding the project-level Release path.
+      `interactive-viewer/build.ps1` is a forwarding shim rather than a project-level MSBuild call.
+  - [ ] The three `tools/build-gen-glbs*.ps1` fixture-generator scripts still hardcode an MSVC
+        version path (`…\VC\Tools\MSVC\14.51.36231`). Left alone for now because the fixture
+        corpus work will rewrite them anyway; fix it there, not separately.
 
 ## Keeping this file honest
 

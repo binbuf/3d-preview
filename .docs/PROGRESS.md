@@ -163,6 +163,15 @@ Running log of what's been built against `.docs/design/`, plus the Win32/MSBuild
   - **A real finding, from a test that failed and was right to.** `--batches-write-before-ack` returned the *later* content, not the announced one. The host copies the window when it reaches the batch, not at the instant the notice arrives, so a worker that rewrites before its ack can have its own later section accepted. Nothing invalid gets through — bounds, checksums, generation and ids all still hold, and a mutation landing mid-copy fails the checksum and is cleanly rejected — but **"what the host accepted" is not provably "what the worker announced"**. The test assertion was wrong, not the code, and it now pins the property that does hold. Binding the two would take a content checksum in the notice; that would catch an honest worker's bug and not a hostile one, which controls both halves anyway. Recorded rather than silently reframed, and the same race explains `--batches-after-terminal`.
   - **Verified**: `Tests.ImportIsolation` **150/150** (1697 assertions, up from 135/1629) and `Tests.Unit` **71/71** (5559 Debug / 5473 Release, **unchanged to the assertion** — the intended signal for a chunk that touches no graphics code), both configurations, first-after-build run discarded, 3 repeats each, no flakiness. The load-bearing case is a differential pair through the *real* sandboxed worker: `basisu_textured_triangle.glb` imported at the shipping 64 MiB window (1 batch) and again at a window sized from the fixture to hold one chunk and little else, asserting more than one batch, the same chunk count, and **byte-identical payloads compared by chunk id** — plus the same file at the same tiny window with batching not permitted, which still fails cleanly with `ResourceLimit`. Shrinking the window rather than growing the model reaches the same code path a 350 MiB file would without committing one, the same differential shape `ImportSessionTests.cpp` already used for the section-size regression. App-level: all four fixtures render under `--d3d12` with non-background pixel counts of **98,456 / 73,041**, matching the baselines recorded two entries above exactly, and no leftover `Preview3D.exe`/`Preview3DImportWorker.exe`.
   - **Honest gaps, stated up front.** (a) **No progressive *display* yet** — `ImportSessionRequest::onBatch` exists and is proven by a test, but `D3D12ImportBridge` does not supply one, so a batched import still accumulates host-side and uploads once. Getting the first geometry on screen before the last batch crosses is the next chunk; this one built the protocol and acceptance rules it needs. (b) **STL and PLY gain nothing yet**: both emit exactly *one* chunk for an entire file, so there is nothing for a batcher to split and A-large-stl/ply are still unreachable. That needs the cluster splitting in Gate 3 deliverable 5 (`03-...:140`'s 4–16 MiB / 262,144-triangle targets), which is also what a single glTF primitive bigger than the window needs. (c) **A-large is still not reachable for glTF either**: the worker normalizes the whole model in memory before emitting any batch, so the 1 GiB parser/normalizer scratch budget still bounds it — true streaming parse-then-emit-then-free is separate work. What this chunk closes is the *window*, not the *scratch budget*.
+- **Gate 0's CI deliverable, three days late and worth the detour**: done, committed (`850daf1` … `5f896d8`). Closes the last structural item in Gate 0 (`10-…:73`) plus the licence half of `10-…:72`.
+  - **Why it was the right thing to do before more format work.** Not "do the tests pass" — 221 cases already passed, run by hand. The value is the *clean checkout*. All three environment traps recorded in this file (the `IncrementalClean` DLL deletion, the release-`/MD`-DLLs-in-`x64\Debug` `_ITERATOR_DEBUG_LEVEL` mismatch, and the `$(SolutionDir)`-undefined project-level build) are stale- or wrong-output-tree faults, and none of them can reproduce on a fresh clone. That is a whole class of expensive misdiagnosis retired by one job.
+  - **Two halves, because neither covers the other.** `.github/workflows/ci.yml` runs on every push, pinned to `windows-2025-vs2026` rather than `windows-latest` (`Directory.Build.props` pins `PlatformToolset=v145`, and NFR-12 wants the toolchain named rather than inherited from wherever a floating label points this month). `scripts/ci-local.ps1` does the same from a clean clone on this machine, where there is a GPU.
+  - **One entry point, used by both.** `scripts/build.ps1` and `scripts/run-tests.ps1`, always building `Preview3D.slnx`. The three scripts that did not are fixed: `interactive-viewer/build.ps1` (ran MSBuild against the `.vcxproj` directly, into a second output tree beside the real one — now a forwarding shim), `smoke-test.ps1`/`smoke-empty.ps1` (hardcoded an absolute path into that same project-level tree), and `build-test-loader.ps1` (referenced a `test-loader.cpp` that has never existed here — removed).
+  - **The [graphics] gap, measured rather than assumed.** 45 of `Tests.Unit`'s 71 cases need a D3D12 adapter and hosted runners have none, so hosted CI covers **176 of 221** cases. A self-hosted runner would close that on paper and is deliberately not used: this repository is public, so a fork's pull request would execute on the runner's machine. `tests/unit/GraphicsTestSupport.h` adds a `PREVIEW3D_TEST_FORCE_WARP` seam (in the test support, **not** in `D3D12Device` — ADR-009's rejection of automatic WARP fallback stands) and records why it is not yet enough: individual `[graphics]` cases pass under WARP, including WARP device creation and the fence/queue cases, but the full `[graphics]~[hardware]` set aborts with exit code **125** partway through and takes Catch2's buffered output with it, so nothing is even reported as started. Fine one at a time and fatal in aggregate points at process-wide state — one shared WARP device now driven through the swap chain, the D3D11On12/D2D bridge and the upload ring in one process — rather than at any single case.
+  - **A side benefit that paid for itself.** Consolidating five byte-identical local `SharedDevice()` definitions into one inline helper means `Tests.Unit` now creates **one** D3D12 device instead of five.
+  - **Licence compliance moved ahead of the rest of Gate 7**, because "open source" and "no `LICENSE` file" cannot both be true. `LICENSE` is the canonical Apache-2.0 text fetched verbatim; `NOTICE` indexes all eight dependencies at their resolved versions and splits them into linked-today (fastgltf 0.9.0, Draco 1.5.7, KTX-Software 4.4.2, Basis Universal 2.50), test-only (Catch2 3.16.0), and pinned-but-unwired (meshoptimizer 1.2, DirectXTex, libwebp 1.6.0 — the R-22 three, listed rather than omitted because vcpkg autolink puts the whole triplet's `lib\*.lib` on the link line). `NOTICE` states plainly that it is **not** the SBOM, which NFR-12 still wants and Gate 7 still owes.
+  - **Verified end to end**: `ci-local.ps1 -Configuration Both` from a clean clone — both configurations, **0 build warnings**, `Tests.Unit` 71/71 and `Tests.ImportIsolation` 150/150 in each, 4m26s total. Debug 5555 + 1697 assertions, Release 5469 + 1697.
+  - **Honest gaps.** (a) The hosted job has never actually run — it is pushed but unverified, and the step most likely to surprise is `Tests.ImportIsolation`, which creates an AppContainer profile and launches real sandboxed children on a runner whose security configuration is unknown. (b) The 45 `[graphics]` cases depend on someone running `ci-local.ps1` before pushing; nothing enforces it. (c) The `tools/build-gen-glbs*.ps1` scripts still hardcode an MSVC version path — left for the fixture-corpus work, which will rewrite them anyway.
 - **Not yet started**: swapping `Renderer.cpp` off D3D11 entirely, the 4 GiB-streaming and open/close/reopen Gate 2 integration exit criteria, porting the real chrome onto the (now built) D2D overlay bridge, device-loss recovery, `WorkerPool`-based reuse, point-cloud rendering, and the rest of Gate 3's list (the meshoptimizer LOD/proxy builder, verified bounds/double-origin normalization, stratified proxy sampling, the inbox WIC/DirectXTex/libwebp mip pipeline for non-basisu images, derived-cache production wiring, draw sorting/instancing, error/warning mapping). **Gate 2 is otherwise done** — see Status above. *(Correction: this bullet previously listed "the Direct2D-overlay-on-D3D12 decision (ADR-010)" as not started. That was already stale when written — ADR-010 is a Gate 1 decision that was taken, and `2cbd8da`/`47db471`/`e86ebc5` built the bridge. What remains is porting the real chrome onto it; the overlay currently draws only `--overlay-spike` stand-in primitives.)*
 
 ## Gate 3 scorecard
@@ -308,6 +317,44 @@ project build — which makes it easy to check the wrong one and conclude the DL
 `x64\<Config>\`, not the per-project output directory. A baseline comparison built the same
 wrong way will "confirm" the failure is pre-existing, which is exactly what happened here
 before the paths were checked.
+
+### A clone under a long path fails to build draco, with a `C1083` that blames the compiler
+
+Found on the very first full run of `scripts/ci-local.ps1`, which is the sort of
+thing that job exists to find. The fourth entry in this family, and the fourth
+time the diagnostic pointed at the wrong component.
+
+A clean clone at `$env:TEMP\preview3d-ci-<timestamp>\repo` built nothing: vcpkg
+rebuilt `draco:x64-windows` from source and ninja stopped with
+
+    prediction_scheme_encoder_factory.cc : fatal error C1083:
+        Cannot open compiler generated file: '': Invalid argument
+
+An empty filename and "Invalid argument" read as a toolchain or port defect. It
+is neither. vcpkg builds a port's sources under
+`<clone>\vcpkg_installed\x64-windows\vcpkg\blds\<port>\src\<version>.clean\…`,
+and Draco's deepest source file sits far enough down that tree that the path
+reached **226 characters** before the even longer
+`CMakeFiles\…\<hash>\<file>.cc.obj` output path was appended. MSVC has no
+long-path support there, so `cl.exe` failed to create its own output file and
+reported the name it could not create — which was empty.
+
+MSBuild had been saying a milder version of the same thing all along, once per
+project: `warning MSB8029: The Intermediate directory or Output directory cannot
+reside under the Temporary directory`. Easy to read as boilerplate.
+
+Fix: `ci-local.ps1` clones to `<repo drive>\.p3dci\r` — short, off `TEMP`, same
+drive — warns if a caller passes a `-WorkDirectory` long enough to hit the same
+wall, and removes a previous clone so a kept or interrupted run does not make the
+next one fail. After that the same run completes in 4m26s, and the vcpkg restore
+is fast because the local binary cache (94 packages, 564 MB under
+`%LOCALAPPDATA%\vcpkg\archives`) can finally be used.
+
+Worth carrying forward: **a vcpkg source build failing with `C1083` on a path you
+chose is a MAX_PATH problem, not a port problem.** Check the length before
+opening an upstream issue. Note the general shape this shares with the
+`_ITERATOR_DEBUG_LEVEL` entry below — an environment fault whose error message
+names a third-party component.
 
 ### Release vcpkg DLLs in `x64\Debug` — the "fastgltf is broken" false alarm
 
