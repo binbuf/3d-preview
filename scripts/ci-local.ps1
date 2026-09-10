@@ -83,11 +83,44 @@ try {
         $treeRoot = $repositoryRoot
     }
     else {
+        # Deliberately NOT $env:TEMP, and deliberately short, for two measured
+        # reasons:
+        #
+        #   1. MSBuild emits MSB8029 for any output directory under the
+        #      temporary directory ("could lead to issues with incremental
+        #      build"), once per project, every build.
+        #   2. More seriously, vcpkg builds a dependency from source inside
+        #      <clone>\vcpkg_installed\...\blds\<port>\src\<version>.clean\...
+        #      and MSVC has no long-path support there. A clone under
+        #      $env:TEMP\preview3d-ci-<timestamp>\repo put draco's
+        #      prediction_scheme_encoder_factory.cc at 226 characters before its
+        #      even longer object path, and cl.exe failed with
+        #      "fatal error C1083: Cannot open compiler generated file: '':
+        #      Invalid argument" -- a MAX_PATH failure that reads like a broken
+        #      dependency.
+        #
+        # A short directory at the root of the repository's own drive keeps the
+        # whole tree comfortably inside MAX_PATH.
         if (-not $WorkDirectory) {
-            $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
-            $WorkDirectory = Join-Path $env:TEMP "preview3d-ci-$stamp"
+            $driveRoot = [System.IO.Path]::GetPathRoot($repositoryRoot)
+            $WorkDirectory = Join-Path $driveRoot '.p3dci'
         }
-        $cloneRoot = Join-Path $WorkDirectory 'repo'
+        $cloneRoot = Join-Path $WorkDirectory 'r'
+
+        # vcpkg's deepest source path sits roughly 150 characters below the
+        # clone root; warn before spending minutes on a build that cannot finish.
+        if ($cloneRoot.Length -gt 40) {
+            Write-Warning ("Clone root is $($cloneRoot.Length) characters. vcpkg source builds add ~150 " +
+                           'more and MSVC has no long-path support there. Pass a shorter -WorkDirectory ' +
+                           'if the build fails with C1083 "Cannot open compiler generated file".')
+        }
+
+        # A previous run that was kept, or interrupted, would otherwise make the
+        # clone fail rather than be replaced.
+        if (Test-Path -LiteralPath $cloneRoot) {
+            Write-Host "Removing previous clone at $cloneRoot"
+            Remove-Item -LiteralPath $cloneRoot -Recurse -Force
+        }
 
         Write-Section "Clean clone -> $cloneRoot"
 
@@ -165,8 +198,8 @@ finally {
 
     if ($cloneRoot -and (Test-Path -LiteralPath $cloneRoot)) {
         if ($succeeded -and -not $KeepWorkDirectory) {
-            Write-Host "Removing clone at $WorkDirectory"
-            Remove-Item -LiteralPath $WorkDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "Removing clone at $cloneRoot"
+            Remove-Item -LiteralPath $cloneRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
         else {
             Write-Host "Clone kept for inspection: $cloneRoot"
