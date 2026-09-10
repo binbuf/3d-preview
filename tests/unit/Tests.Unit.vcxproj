@@ -91,6 +91,7 @@
     <ClCompile Include="..\..\shared\model-core\src\MappedFile.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="GraphicsTestSupport.h" />
     <ClInclude Include="..\..\shared\model-core\include\model_core\WireFormat.h" />
     <ClInclude Include="..\..\shared\model-core\include\model_core\VertexLayouts.h" />
     <ClInclude Include="..\..\shared\model-core\include\model_core\Checksum.h" />

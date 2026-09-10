@@ -18,6 +18,7 @@
 #include "D3D12CommandQueue.h"
 #include "D3D12Device.h"
 #include "D3D12SwapChain.h"
+#include "GraphicsTestSupport.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -38,17 +39,6 @@ std::string Narrow(const std::wstring& text)
         narrowed.push_back(c < 128 ? static_cast<char>(c) : '?');
     }
     return narrowed;
-}
-
-D3D12Device& SharedDevice()
-{
-    static D3D12Device device = [] {
-        D3D12Device d;
-        auto result = d.Initialize();
-        REQUIRE(result.success);
-        return d;
-    }();
-    return device;
 }
 
 struct OverlayTestWindow {

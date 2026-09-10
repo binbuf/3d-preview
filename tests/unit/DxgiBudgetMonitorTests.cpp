@@ -7,28 +7,15 @@
 
 #include "D3D12Device.h"
 #include "DxgiBudgetMonitor.h"
+#include "GraphicsTestSupport.h"
 #include "SceneSnapshot.h"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <vector>
 
-namespace {
-
-D3D12Device& SharedDevice()
-{
-    static D3D12Device device = [] {
-        D3D12Device d;
-        auto result = d.Initialize();
-        REQUIRE(result.success);
-        return d;
-    }();
-    return device;
-}
-
-} // namespace
-
-TEST_CASE("DxgiBudgetMonitor initializes against real hardware and reports a plausible budget", "[graphics]")
+TEST_CASE("DxgiBudgetMonitor initializes against the live adapter and reports a plausible budget",
+          "[graphics]")
 {
     DxgiBudgetMonitor monitor;
     std::wstring error;

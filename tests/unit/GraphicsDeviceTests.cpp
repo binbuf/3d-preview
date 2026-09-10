@@ -6,10 +6,11 @@
 // presentation").
 
 #include "D3D12Device.h"
+#include "GraphicsTestSupport.h"
 
 #include <catch2/catch_test_macros.hpp>
 
-TEST_CASE("D3D12Device initializes against real hardware", "[graphics]")
+TEST_CASE("D3D12Device initializes against real hardware", "[graphics][hardware]")
 {
     D3D12Device device;
     auto result = device.Initialize();
@@ -45,8 +46,9 @@ TEST_CASE("Two independent D3D12Device instances can each initialize in the same
     D3D12Device first;
     D3D12Device second;
 
-    auto firstResult = first.Initialize();
-    auto secondResult = second.Initialize();
+    const auto options = preview3d_test::DefaultTestDeviceOptions();
+    auto firstResult = first.Initialize(options);
+    auto secondResult = second.Initialize(options);
 
     REQUIRE(firstResult.success);
     REQUIRE(secondResult.success);

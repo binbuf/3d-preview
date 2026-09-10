@@ -8,6 +8,7 @@
 
 #include "D3D12Device.h"
 #include "D3D12UploadRing.h"
+#include "GraphicsTestSupport.h"
 #include "SceneSnapshot.h"
 #include "SyntheticStreamingSource.h"
 
@@ -23,17 +24,6 @@
 #include <vector>
 
 namespace {
-
-D3D12Device& SharedDevice()
-{
-    static D3D12Device device = [] {
-        D3D12Device d;
-        auto result = d.Initialize();
-        REQUIRE(result.success);
-        return d;
-    }();
-    return device;
-}
 
 Microsoft::WRL::ComPtr<ID3D12Resource> MakeBuffer(ID3D12Device& device, uint64_t size,
                                                     D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES initialState)

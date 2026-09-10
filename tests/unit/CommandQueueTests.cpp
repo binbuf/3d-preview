@@ -1,28 +1,11 @@
 #include "D3D12CommandQueue.h"
 #include "D3D12Device.h"
+#include "GraphicsTestSupport.h"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
 #include <thread>
-
-namespace {
-
-// A short-lived device shared by every test case in this file -- device
-// creation is the expensive part; queue/fence creation against an
-// already-created device is cheap.
-D3D12Device& SharedDevice()
-{
-    static D3D12Device device = [] {
-        D3D12Device d;
-        auto result = d.Initialize();
-        REQUIRE(result.success);
-        return d;
-    }();
-    return device;
-}
-
-} // namespace
 
 TEST_CASE("A fresh fence's CompletedValue is 0 before any signal", "[graphics]")
 {

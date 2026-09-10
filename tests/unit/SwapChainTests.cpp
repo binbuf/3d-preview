@@ -7,6 +7,7 @@
 #include "D3D12CommandQueue.h"
 #include "D3D12Device.h"
 #include "D3D12SwapChain.h"
+#include "GraphicsTestSupport.h"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -15,17 +16,6 @@
 #include <vector>
 
 namespace {
-
-D3D12Device& SharedDevice()
-{
-    static D3D12Device device = [] {
-        D3D12Device d;
-        auto result = d.Initialize();
-        REQUIRE(result.success);
-        return d;
-    }();
-    return device;
-}
 
 // A minimal, real, never-shown HWND to host a swap chain for the duration
 // of one test case. Not HWND_MESSAGE -- message-only windows are a
